@@ -1,5 +1,5 @@
 {
   "permissions": {
-    "openapi": ["subscribeMessage.send"]
+    "openapi": ["wxacode.getUnlimited"]
   }
 }

@@ -1,9 +1,8 @@
 <view class="page">
   <view class="section">
     <view class="title">管理员后台</view>
-    <view class="subtitle">云端桌台台账 · 计时计费 · 代客下单与结账</view>
-    <button size="mini" class="secondary-button" bindtap="subscribeOrders">订阅新订单提醒</button>
-    <view class="subtitle">每位管理员需单独订阅；一次性模板的通知次数用完后需再次订阅</view>
+    <view class="subtitle">云端桌台台账 · 动态计时 · 特殊商品定向提成</view>
+    <button class="secondary-button" bindtap="openStaff">游戏师管理</button>
   </view>
 
   <view class="stats">
@@ -29,10 +28,12 @@
         </view>
         <view wx:if="{{item.status === 'using'}}" class="table-summary">
           <view>已消费 {{item.elapsedText}}</view>
+          <view>时长费 {{item.serviceFeeText}}</view>
           <view class="price">{{item.totalText}}</view>
         </view>
         <view wx:else class="subtitle">点击查看 / 管理</view>
         <view class="table-actions">
+          <button size="mini" class="secondary-button small-btn" data-table-id="{{item.id}}" catchtap="openStaffing">{{item.status === 'using' ? '调整游戏师' : '开台绑定游戏师'}}</button>
           <button size="mini" class="secondary-button small-btn" data-table-id="{{item.id}}" catchtap="addOrder">为此桌点单</button>
           <button wx:if="{{item.status === 'using'}}" size="mini" class="primary-button small-btn buy-button" disabled="{{checkoutLoading || settling}}" data-table-id="{{item.id}}" catchtap="checkout">买单</button>
         </view>
@@ -45,18 +46,24 @@
       <view>
         <view class="section-title">{{tableDetail.tableName}} 消费明细</view>
         <view class="subtitle">开台时间：{{tableDetail.startedAtText}}</view>
+        <view class="subtitle">当前在台游戏师：{{tableDetail.currentStaffText}}</view>
       </view>
       <view class="price">已消费 {{tableDetail.elapsedText}}</view>
     </view>
     <view class="detail-line"><text>酒水 / 小吃</text><text>{{tableDetail.itemTotalText}}</text></view>
-    <view class="detail-line"><text>时长服务费（{{tableDetail.billableHours}} 小时）</text><text>{{tableDetail.serviceFeeText}}</text></view>
+    <view class="detail-line"><text>时长服务费（动态计时）</text><text>{{tableDetail.serviceFeeText}}</text></view>
+    <view class="detail-line"><text>预计游戏师提成</text><text>{{tableDetail.commissionView.amountText}}</text></view>
+    <view wx:if="{{tableDetail.commissionView.warning}}" class="subtitle danger">{{tableDetail.commissionView.warning}}</view>
     <view wx:for="{{tableDetail.orders}}" wx:key="id" class="order-detail">
       <view class="row">
         <text>{{item.createdAtText}} · {{item.source === 'admin' ? '管理员代点' : '顾客下单'}}</text>
         <text class="price">{{item.totalText}}</text>
       </view>
       <view wx:for="{{item.items}}" wx:for-item="product" wx:key="productId" class="product-line">
-        <text>{{product.name}} × {{product.quantity}}（{{product.unitPriceText}} / 件）</text>
+        <view>
+          <text>{{product.name}} × {{product.quantity}}（{{product.unitPriceText}} / 件）</text>
+          <view class="subtitle">{{product.commissionText}}</view>
+        </view>
         <text>{{product.lineTotalText}}</text>
       </view>
     </view>
@@ -65,36 +72,71 @@
       <text class="price">{{tableDetail.totalText}}</text>
     </view>
     <view class="detail-actions">
+      <button class="secondary-button" data-table-id="{{tableDetail.tableId}}" catchtap="openStaffing">调整游戏师</button>
       <button class="secondary-button" data-table-id="{{tableDetail.tableId}}" catchtap="addOrder">代客加单</button>
       <button class="primary-button" data-table-id="{{tableDetail.tableId}}" bindtap="checkout">查看买单账单</button>
     </view>
   </view>
 
-    <view wx:if="{{checkoutBill}}" class="checkout-overlay" catchtouchmove="closeNothing">
-      <view class="checkout-sheet">
-        <view class="checkout-title">{{checkoutBill.tableName}} · 买单账单</view>
-        <view class="subtitle">请向客人展示，实际收到款后再确认清台</view>
-        <scroll-view scroll-y class="checkout-content">
-          <view class="subtitle">开台：{{checkoutBill.startedAtText}}</view>
-          <view class="subtitle">消费时长：{{checkoutBill.elapsedText}}</view>
-          <view wx:for="{{checkoutBill.orders}}" wx:key="id" class="order-detail">
-            <view class="subtitle">{{item.createdAtText}}</view>
-            <view wx:for="{{item.items}}" wx:for-item="product" wx:key="productId" class="product-line">
+  <view wx:if="{{checkoutBill}}" class="checkout-overlay" catchtouchmove="closeNothing">
+    <view class="checkout-sheet">
+      <view class="checkout-title">{{checkoutBill.tableName}} · 买单账单</view>
+      <view class="subtitle">请向客人展示，实际收到款后再确认清台</view>
+      <scroll-view scroll-y class="checkout-content">
+        <view class="subtitle">开台：{{checkoutBill.startedAtText}}</view>
+        <view class="subtitle">消费时长：{{checkoutBill.elapsedText}}</view>
+        <view class="subtitle">当前在台游戏师：{{checkoutBill.currentStaffText}}</view>
+        <view wx:for="{{checkoutBill.orders}}" wx:key="id" class="order-detail">
+          <view class="subtitle">{{item.createdAtText}}</view>
+          <view wx:for="{{item.items}}" wx:for-item="product" wx:key="productId" class="product-line">
+            <view>
               <text>{{product.name}} × {{product.quantity}}（{{product.unitPriceText}}）</text>
-              <text>{{product.lineTotalText}}</text>
+              <view class="subtitle">{{product.commissionText}}</view>
             </view>
+            <text>{{product.lineTotalText}}</text>
           </view>
-          <view class="detail-line"><text>商品合计</text><text>{{checkoutBill.itemTotalText}}</text></view>
-          <view class="detail-line"><text>时长费（{{checkoutBill.billableHours}} 小时）</text><text>{{checkoutBill.serviceFeeText}}</text></view>
-        </scroll-view>
-        <view class="row detail-total"><text>应收金额</text><text class="price">{{checkoutBill.totalText}}</text></view>
-        <view class="subtitle">此为展示时金额；账单发生变化时需重新打开核对。</view>
-        <view class="checkout-actions">
-          <button size="mini" class="secondary-button" disabled="{{settling}}" bindtap="closeCheckout">暂不清台</button>
-          <button size="mini" class="primary-button" loading="{{settling}}" disabled="{{settling}}" bindtap="confirmPayment">已收款，确认清台</button>
         </view>
+        <view class="detail-line"><text>商品合计</text><text>{{checkoutBill.itemTotalText}}</text></view>
+        <view class="detail-line"><text>时长费（动态计时）</text><text>{{checkoutBill.serviceFeeText}}</text></view>
+        <button size="mini" class="secondary-button" bindtap="toggleCommission">{{showCommission ? '收起内部提成信息' : '游戏师提成预览（内部）'}}</button>
+        <view wx:if="{{showCommission}}" class="commission-panel">
+          <view class="detail-line"><text>本桌预计提成</text><text>{{checkoutBill.commissionView.amountText}}</text></view>
+          <view class="subtitle">普通商品 {{checkoutBill.commissionView.sharedGoodsText}} · 特殊商品 {{checkoutBill.commissionView.specialGoodsText}} · 时长费 {{checkoutBill.commissionView.serviceText}}</view>
+          <view wx:if="{{checkoutBill.commissionView.warning}}" class="subtitle danger">{{checkoutBill.commissionView.warning}}</view>
+          <view wx:for="{{checkoutBill.commissionView.allocations}}" wx:key="employeeId" class="allocation-card">
+            <view class="row"><text>{{item.employeeName}}</text><text>{{item.amountText}}</text></view>
+            <view class="subtitle">时长 {{item.serviceAmountText}} · 普通商品 {{item.goodsSharedAmountText}} · 特殊商品 {{item.specialAmountText}}</view>
+          </view>
+          <view wx:if="{{checkoutBill.commissionView.unassignedItems.length}}" class="subtitle danger">未指定特殊商品：{{checkoutBill.commissionView.unassignedItems.length}} 条</view>
+        </view>
+      </scroll-view>
+      <view class="row detail-total"><text>应收金额</text><text class="price">{{checkoutBill.totalText}}</text></view>
+      <view class="subtitle">此为展示时金额；账单发生变化时需重新打开核对。</view>
+      <view class="checkout-actions">
+        <button size="mini" class="secondary-button" disabled="{{settling}}" bindtap="closeCheckout">暂不清台</button>
+        <button size="mini" class="primary-button" loading="{{settling}}" disabled="{{settling}}" bindtap="confirmPayment">已收款，确认清台</button>
       </view>
     </view>
+  </view>
+
+  <view wx:if="{{staffing}}" class="checkout-overlay" catchtouchmove="closeNothing">
+    <view class="checkout-sheet">
+      <view class="checkout-title">{{staffing.tableName}} · 绑定在台游戏师</view>
+      <view class="subtitle">保存后会按当前时间切换新的计时分段。</view>
+      <scroll-view scroll-y class="checkout-content">
+        <view wx:if="{{!staffing.employees.length}}" class="subtitle danger">暂无在职游戏师，请先到游戏师管理里添加。</view>
+        <view wx:for="{{staffing.employees}}" wx:key="id" class="staff-option {{staffing.selectedIds.indexOf(item.id) >= 0 ? 'selected' : ''}}" data-id="{{item.id}}" bindtap="toggleStaffOption">
+          <text>{{item.name}}</text>
+          <text>{{staffing.selectedIds.indexOf(item.id) >= 0 ? '已选' : '点击选择'}}</text>
+        </view>
+      </scroll-view>
+      <view class="subtitle">已选 {{staffing.selectedIds.length}} 人</view>
+      <view class="checkout-actions">
+        <button size="mini" class="secondary-button" disabled="{{staffing.saving}}" bindtap="closeStaffing">取消</button>
+        <button size="mini" class="primary-button" loading="{{staffing.saving}}" disabled="{{staffing.saving}}" bindtap="saveStaffing">保存绑定</button>
+      </view>
+    </view>
+  </view>
 
   <view class="section">
     <view class="record-tabs">
@@ -103,31 +145,32 @@
     </view>
     <view class="subtitle">最近 10 条{{recordTab === 'orders' ? '订单' : '买单记录'}}</view>
     <block wx:if="{{recordTab === 'orders'}}">
-    <view wx:if="{{!orders.length}}" class="subtitle empty">暂无订单</view>
-    <view wx:for="{{orders}}" wx:key="id" class="list-row order-row">
-      <view class="row">
-        <view>
-          <view>{{item.tableName}}</view>
-          <view class="subtitle">{{item.createdAtText}}</view>
+      <view wx:if="{{!orders.length}}" class="subtitle empty">暂无订单</view>
+      <view wx:for="{{orders}}" wx:key="id" class="list-row order-row">
+        <view class="row">
+          <view>
+            <view>{{item.tableName}}</view>
+            <view class="subtitle">{{item.createdAtText}}</view>
+          </view>
+          <view class="price">{{item.totalText}}</view>
         </view>
-        <view class="price">{{item.totalText}}</view>
+        <view class="subtitle">{{item.statusText}}</view>
       </view>
-      <view class="subtitle">{{item.statusText}} · {{item.id}}</view>
-    </view>
     </block>
     <block wx:else>
-      <view wx:if="{{!settlements.length}}" class="subtitle empty">暂无买单记录，确认收款清台后自动记录</view>
+      <view wx:if="{{!settlements.length}}" class="subtitle empty">暂无买单记录</view>
       <view wx:for="{{settlements}}" wx:key="recordId" class="list-row">
         <view class="row">
           <view>
-            <view>{{item.tableName}} · 已收款清台</view>
+            <view>{{item.tableName}}</view>
             <view class="subtitle">{{item.closedAtText}}</view>
           </view>
           <view class="price">{{item.totalText}}</view>
         </view>
-        <view class="subtitle">商品 {{item.itemTotalText}} · 时长费 {{item.serviceFeeText}}</view>
-        <view class="subtitle">消费 {{item.elapsedText}} · 计费 {{item.billableHours}} 小时</view>
-        <view class="subtitle">买单号：{{item.recordId}}</view>
+        <view class="subtitle">商品 {{item.itemTotalText}} · 时长费 {{item.serviceFeeText}} · 游戏师提成 {{item.commissionView.amountText}}</view>
+        <view wx:for="{{item.commissionView.allocations}}" wx:for-item="allocation" wx:key="employeeId" class="subtitle">
+          {{allocation.employeeName}}：{{allocation.amountText}}
+        </view>
       </view>
     </block>
   </view>

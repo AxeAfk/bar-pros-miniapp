@@ -1,7 +1,5 @@
 const store = require('../../services/store');
 const { formatMoney, formatDuration } = require('../../utils/format');
-const { hourlyServiceFee } = require('../../config/app');
-
 Page({
   data: {
     order: null,
@@ -50,7 +48,10 @@ Page({
       return store.getCustomerSession(order.tableId, order.sessionId).then((session) => ({ order, session }));
     }).then(({ order, session }) => {
       this._sessionStartedAt = session ? session.startedAt : null;
-      this._sessionItemTotal = session ? session.itemTotal : 0;
+      this._sessionItemTotalCents = session ? (session.itemTotalCents || Math.round(session.itemTotal * 100)) : 0;
+      this._serviceFeeBaseCents = session ? (session.serviceFeeCents || Math.round(session.serviceFee * 100)) : 0;
+      this._serviceFeeBaseAt = session ? (session.pricedAt || Date.now()) : 0;
+      this._currentServiceRateCentsPerHour = session ? (session.currentServiceRateCentsPerHour || 0) : 0;
       this.setData({
         order: {
           ...order,
@@ -83,17 +84,17 @@ Page({
       return;
     }
     const elapsedMs = Math.max(0, Date.now() - this._sessionStartedAt);
-    const billableHours = Math.max(1, Math.ceil(elapsedMs / (60 * 60 * 1000)));
-    const serviceFee = billableHours * hourlyServiceFee;
-    const itemTotal = this._sessionItemTotal;
+    const serviceFeeCents = this._serviceFeeBaseCents + Math.round(
+      Math.max(0, Date.now() - this._serviceFeeBaseAt) * this._currentServiceRateCentsPerHour / (60 * 60 * 1000)
+    );
+    const itemTotalCents = this._sessionItemTotalCents;
     this.setData({
       session: {
         ...this.data.session,
         elapsedText: formatDuration(elapsedMs),
-        billableHours,
-        itemTotalText: formatMoney(itemTotal),
-        serviceFeeText: formatMoney(serviceFee),
-        totalText: formatMoney(itemTotal + serviceFee)
+        itemTotalText: formatMoney(itemTotalCents / 100),
+        serviceFeeText: formatMoney(serviceFeeCents / 100),
+        totalText: formatMoney((itemTotalCents + serviceFeeCents) / 100)
       }
     });
   },

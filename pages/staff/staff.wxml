@@ -1,0 +1,53 @@
+<view class="page">
+  <view class="section">
+    <view class="title">后台成员管理</view>
+    <view class="subtitle">唯一管理员：{{adminProfile.ownerMaskedOpenid || '未配置'}}</view>
+    <view class="actions">
+      <button size="mini" class="secondary-button" loading="{{loadingAdminMembers}}" bindtap="refreshAdminMembers">刷新</button>
+      <button wx:if="{{adminProfile.isOwner}}" size="mini" class="primary-button" loading="{{creatingInvite}}" disabled="{{creatingInvite}}" bindtap="createInvite">生成邀请二维码</button>
+    </view>
+    <view wx:if="{{invite}}" class="editor">
+      <view>邀请码：{{invite.code}}</view>
+      <view class="subtitle">有效期至：{{invite.expiresAtText}}</view>
+      <image wx:if="{{invite.qrCodeUrl}}" class="invite-qrcode" mode="widthFix" src="{{invite.qrCodeUrl}}" />
+      <view wx:else class="subtitle">二维码暂未生成成功，可稍后重新生成邀请码。</view>
+      <view class="subtitle">受邀成员扫码后会自动加入后台成员列表。</view>
+    </view>
+    <view wx:if="{{!adminMembers.length && !loadingAdminMembers}}" class="subtitle">暂无后台成员</view>
+    <view wx:for="{{adminMembers}}" wx:key="openid" class="record">
+      <view class="row">
+        <view>
+          <view>{{item.roleText}}</view>
+          <view class="subtitle">{{item.maskedOpenid}}</view>
+          <view wx:if="{{item.joinedAtText}}" class="subtitle">加入时间：{{item.joinedAtText}}</view>
+        </view>
+        <button wx:if="{{adminProfile.isOwner && item.removable}}" size="mini" class="secondary-button" loading="{{removingMemberId === item.openid}}" disabled="{{removingMemberId}}" data-id="{{item.openid}}" bindtap="removeAdminMember">移除</button>
+      </view>
+    </view>
+  </view>
+
+  <view class="section">
+    <view class="title">游戏师管理</view>
+    <view class="subtitle">停用游戏师不影响历史结算记录；每笔买单记录会保留当时的提成快照。</view>
+    <view class="actions">
+      <button size="mini" class="primary-button" disabled="{{saving}}" bindtap="newEmployee">新增游戏师</button>
+      <button size="mini" class="secondary-button" loading="{{loadingEmployees}}" bindtap="refreshEmployees">刷新</button>
+    </view>
+    <view wx:if="{{editor}}" class="editor">
+      <input placeholder="游戏师姓名（最多 30 字）" maxlength="30" value="{{editor.name}}" disabled="{{saving}}" bindinput="editName" />
+      <view class="row"><text>在职 / 可参与提成</text><switch checked="{{editor.active}}" disabled="{{saving}}" bindchange="editActive" color="#d6a354" /></view>
+      <view class="actions">
+        <button size="mini" class="secondary-button" disabled="{{saving}}" bindtap="cancelEdit">取消</button>
+        <button size="mini" class="primary-button" loading="{{saving}}" disabled="{{saving}}" bindtap="saveEmployee">保存</button>
+      </view>
+    </view>
+    <view wx:if="{{!employees.length && !loadingEmployees}}" class="subtitle">暂无游戏师，请先新增。</view>
+    <view wx:for="{{employees}}" wx:key="id" class="record row">
+      <view>
+        <text>{{item.name}} · {{item.active ? '在职' : '已停用'}}</text>
+        <view class="subtitle">{{item.id}}</view>
+      </view>
+      <button size="mini" class="secondary-button" disabled="{{saving}}" data-id="{{item.id}}" bindtap="editEmployee">编辑</button>
+    </view>
+  </view>
+</view>

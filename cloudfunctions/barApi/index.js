@@ -1,5 +1,6 @@
 const cloud = require('wx-server-sdk');
 const crypto = require('crypto');
+const commissionRules = require('./commission');
 
 cloud.init({
   env: cloud.DYNAMIC_CURRENT_ENV
@@ -26,14 +27,15 @@ const products = [
   { id: 'p016', name: '诱惑7号', price: 50, onSale: true },
   { id: 'p017', name: '诱惑9号', price: 50, onSale: true },
   { id: 'p018', name: '1664白啤', price: 50, onSale: true },
-  { id: 'p019', name: '香槟', price: 500, onSale: true },
-  { id: 'p020', name: '轩尼诗VSOP', price: 2500, onSale: true },
+  { id: 'p019', name: '香槟', price: 500, onSale: true, commission: { scope: 'designated', rateBps: 3000 } },
+  { id: 'p020', name: '轩尼诗VSOP', price: 2500, onSale: true, commission: { scope: 'designated', rateBps: 3000 } },
   { id: 'p021', name: '动力苏打酒', price: 20, onSale: true },
   { id: 'p022', name: '矿泉水', price: 10, onSale: true },
   { id: 'p023', name: '可乐', price: 10, onSale: true }
 ];
 const hourlyServiceFee = 99;
 const hourMs = 60 * 60 * 1000;
+const adminInviteTtlMs = 30 * 60 * 1000;
 
 function normalizeTableId(value) {
   const input = String(value || '').trim().toUpperCase();
@@ -62,29 +64,119 @@ function formatDuration(milliseconds) {
   return `${pad(hours)}:${pad(minutes)}:${pad(seconds)}`;
 }
 
-function serviceFeeFor(startedAt, now) {
-  const elapsedMs = Math.max(0, now - startedAt);
-  const billableHours = Math.max(1, Math.ceil(elapsedMs / hourMs));
+function createStaffSegment(staffIds, startedAt) {
   return {
-    elapsedMs,
-    elapsedText: formatDuration(elapsedMs),
-    billableHours,
-    serviceFee: billableHours * hourlyServiceFee
+    startAt: startedAt,
+    startAtText: formatTime(startedAt),
+    endAt: null,
+    endAtText: '',
+    staffIds: commissionRules.normalizeStaffIds(staffIds)
   };
 }
 
-function assertAdmin(openid) {
-  if (!isAdmin(openid)) {
+function createSessionRecord(table, startedAt, staffIds = []) {
+  const normalizedStaffIds = commissionRules.normalizeStaffIds(staffIds);
+  return {
+    id: createId('S'),
+    tableId: table.id,
+    tableName: table.name,
+    startedAt,
+    startedAtText: formatTime(startedAt),
+    currentStaffIds: normalizedStaffIds,
+    staffSegments: [createStaffSegment(normalizedStaffIds, startedAt)]
+  };
+}
+
+async function getEmployeesByIds(employeeIds, transaction) {
+  const ids = commissionRules.normalizeStaffIds(employeeIds);
+  const collection = (transaction || db).collection('bar_employees');
+  const employees = [];
+  for (const employeeId of ids) {
+    const result = await collection.doc(employeeId).get();
+    if (result.data) employees.push(result.data);
+  }
+  return Object.fromEntries(employees.map((employee) => [employee.id, employee]));
+}
+
+function collectSessionEmployeeIds(session, orders) {
+  const ids = [];
+  const seen = new Set();
+  const append = (employeeId) => {
+    if (typeof employeeId !== 'string' || !employeeId || seen.has(employeeId)) return;
+    seen.add(employeeId);
+    ids.push(employeeId);
+  };
+  (Array.isArray(session.currentStaffIds) ? session.currentStaffIds : []).forEach(append);
+  (Array.isArray(session.staffSegments) ? session.staffSegments : []).forEach((segment) => {
+    (Array.isArray(segment.staffIds) ? segment.staffIds : []).forEach(append);
+  });
+  (orders || []).forEach((order) => {
+    (order.items || []).forEach((item) => append(item.commission && item.commission.designatedStaffId));
+  });
+  return ids;
+}
+
+function decorateAdminOrders(orders, employeesById) {
+  return orders.map((order) => ({
+    ...order,
+    items: order.items.map((item) => item.commission && item.commission.designatedStaffId
+      ? {
+        ...item,
+        commission: {
+          ...item.commission,
+          designatedStaffName: employeesById[item.commission.designatedStaffId]
+            ? employeesById[item.commission.designatedStaffId].name
+            : item.commission.designatedStaffId
+        }
+      }
+      : item)
+  }));
+}
+
+function getOwnerOpenid() {
+  const explicit = String(process.env.OWNER_OPENID || '').trim();
+  if (explicit) return explicit;
+  return String(process.env.ADMIN_OPENIDS || '')
+    .split(',')
+    .map((id) => id.trim())
+    .filter(Boolean)[0] || '';
+}
+
+function isOwner(openid) {
+  return Boolean(openid && openid === getOwnerOpenid());
+}
+
+async function getAdminMember(openid) {
+  if (!openid) return null;
+  const result = await db.collection('bar_admin_members').doc(openid).get();
+  return result.data && result.data.status !== 'removed' ? result.data : null;
+}
+
+async function isAdmin(openid) {
+  return isOwner(openid) || Boolean(await getAdminMember(openid));
+}
+
+async function assertAdmin(openid) {
+  if (!await isAdmin(openid)) {
     throw new Error('当前微信账号未获管理员授权');
   }
 }
 
-function isAdmin(openid) {
-  const allowedOpenIds = String(process.env.ADMIN_OPENIDS || '')
-    .split(',')
-    .map((id) => id.trim())
-    .filter(Boolean);
-  return Boolean(openid && allowedOpenIds.includes(openid));
+function assertOwner(openid) {
+  if (!isOwner(openid)) {
+    throw new Error('只有唯一管理员可以管理后台成员');
+  }
+}
+
+function maskOpenid(openid) {
+  const text = String(openid || '');
+  if (text.length <= 10) return text;
+  return `${text.slice(0, 4)}…${text.slice(-4)}`;
+}
+
+function randomInviteCode(length = 8) {
+  const alphabet = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
+  return Array.from(crypto.randomBytes(length), (byte) => alphabet[byte % alphabet.length]).join('');
 }
 
 async function ensureTables() {
@@ -111,24 +203,24 @@ function summarizeSession(session, orders) {
   if (!session) {
     return null;
   }
-  const now = Date.now();
-  const charges = serviceFeeFor(session.startedAt, now);
-  const itemTotal = Number(session.itemTotal || 0);
+  const summary = commissionRules.summarizeSession(session, orders || [], Date.now(), hourlyServiceFee);
   return {
     ...session,
+    ...summary,
     orders: orders || [],
-    ...charges,
-    itemTotal,
-    totalAmount: itemTotal + charges.serviceFee
+    elapsedText: formatDuration(summary.elapsedMs)
   };
 }
 
 function publicOrder(order) {
-  const { ownerOpenid, ...visibleOrder } = order;
-  return visibleOrder;
+  const { ownerOpenid, commission, ...visibleOrder } = order;
+  return {
+    ...visibleOrder,
+    items: order.items.map(({ commission: itemCommission, ...item }) => item)
+  };
 }
 
-async function getSessionOrders(sessionId) {
+async function getSessionOrders(sessionId, admin = false) {
   const orders = [];
   let offset = 0;
   let page = [];
@@ -143,7 +235,7 @@ async function getSessionOrders(sessionId) {
     orders.push(...page);
     offset += page.length;
   } while (page.length === 100);
-  return orders.map(publicOrder);
+  return admin ? orders : orders.map(publicOrder);
 }
 
 async function getTodaySettlements(startedToday) {
@@ -179,11 +271,12 @@ async function getCustomerSession(tableId, sessionId) {
     return null;
   }
   const orders = await getSessionOrders(session.id);
-  return summarizeSession(session, orders);
+  const { commission, ...summary } = summarizeSession(session, orders);
+  return summary;
 }
 
 async function getDashboard(openid) {
-  assertAdmin(openid);
+  await assertAdmin(openid);
   const [storedTables, sessionResult, orderResult, settlementResult] = await Promise.all([
     ensureTables(),
     db.collection('bar_sessions').limit(100).get(),
@@ -222,27 +315,38 @@ async function getDashboard(openid) {
       revenue: activeTotal + settledTotal
     },
     tables: tablesWithSummary,
-    orders: orderResult.data.map(publicOrder),
+    orders: orderResult.data.map(({ ownerOpenid, ...order }) => order),
     settlements: settlementResult.data
   };
 }
 
 async function getTableDetail(tableId, openid) {
-  assertAdmin(openid);
+  await assertAdmin(openid);
   const normalizedId = normalizeTableId(tableId);
   const session = await getActiveSession(normalizedId);
   if (!session) {
     return null;
   }
-  const orders = await getSessionOrders(session.id);
-  return summarizeSession(session, orders);
+  const orders = await getSessionOrders(session.id, true);
+  const employeesById = await getEmployeesByIds(collectSessionEmployeeIds(session, orders));
+  const summary = commissionRules.summarizeSession(session, orders, Date.now(), hourlyServiceFee, employeesById);
+  return {
+    ...session,
+    ...summary,
+    elapsedText: formatDuration(summary.elapsedMs),
+    orders: decorateAdminOrders(orders, employeesById),
+    currentStaff: (session.currentStaffIds || []).map((employeeId) => ({
+      id: employeeId,
+      name: employeesById[employeeId] ? employeesById[employeeId].name : employeeId
+    }))
+  };
 }
 
 async function getOrder(orderId, openid) {
   const result = await db.collection('bar_orders').doc(String(orderId || '')).get();
   const order = result.data;
   if (order.ownerOpenid !== openid) {
-    assertAdmin(openid);
+    await assertAdmin(openid);
   }
   return publicOrder(order);
 }
@@ -251,7 +355,7 @@ async function submitOrder(event, context) {
   const tableId = normalizeTableId(event.tableId);
   const source = event.source === 'admin' ? 'admin' : 'customer';
   if (source === 'admin') {
-    assertAdmin(context.OPENID);
+    await assertAdmin(context.OPENID);
   }
   if (!tables.some((table) => table.id === tableId)) {
     throw new Error('桌号无效，无法提交订单');
@@ -260,20 +364,6 @@ async function submitOrder(event, context) {
     throw new Error('请先选择商品');
   }
 
-  const items = event.items.map((item) => {
-    const product = products.find((candidate) => candidate.id === item.productId && candidate.onSale);
-    const quantity = Number(item.quantity);
-    if (!product || !Number.isInteger(quantity) || quantity < 1 || quantity > 99) {
-      throw new Error('订单商品信息无效，请重新选择');
-    }
-    return {
-      productId: product.id,
-      name: product.name,
-      price: product.price,
-      quantity
-    };
-  });
-  const totalAmount = items.reduce((sum, item) => sum + item.price * item.quantity, 0);
   const now = Date.now();
   const orderId = createId('O');
   await ensureTables();
@@ -294,20 +384,37 @@ async function submitOrder(event, context) {
       .get();
     let session = existingResult.data[0] ? { ...existingResult.data[0] } : null;
     if (!session) {
-      session = {
-        id: createId('S'),
-        tableId,
-        tableName: table.name,
-        startedAt: now,
-        startedAtText: formatTime(now),
-        itemTotal: 0
-      };
+      session = createSessionRecord(table, now, []);
     }
     delete session._id;
-    session = {
-      ...session,
-      itemTotal: Number(session.itemTotal || 0) + totalAmount
-    };
+    const activeStaffIds = Array.isArray(session.currentStaffIds) ? session.currentStaffIds : [];
+    const items = event.items.map((item) => {
+      const product = products.find((candidate) => candidate.id === item.productId && candidate.onSale);
+      const quantity = Number(item.quantity);
+      if (!product || !Number.isInteger(quantity) || quantity < 1 || quantity > 99) {
+        throw new Error('订单商品信息无效，请重新选择');
+      }
+      const config = commissionRules.normalizeProductCommission(product);
+      const designatedStaffId = typeof item.designatedStaffId === 'string' && item.designatedStaffId.trim()
+        ? item.designatedStaffId.trim()
+        : (config.scope === 'designated' && activeStaffIds.length === 1 ? activeStaffIds[0] : '');
+      if (config.scope === 'designated' && !designatedStaffId) {
+        throw new Error(source === 'admin'
+          ? `${product.name} 需要指定当前在台游戏师后才能下单`
+          : `${product.name} 需要由店员确认归属后下单，请联系店员处理`);
+      }
+      if (designatedStaffId && !activeStaffIds.includes(designatedStaffId)) {
+        throw new Error(`${product.name} 只能指定当前在台游戏师`);
+      }
+      return {
+        productId: product.id,
+        name: product.name,
+        price: product.price,
+        quantity,
+        commission: commissionRules.itemCommission(product, quantity, designatedStaffId)
+      };
+    });
+    const totalAmount = items.reduce((sum, item) => sum + item.price * item.quantity, 0);
 
     const order = {
       id: orderId,
@@ -328,8 +435,62 @@ async function submitOrder(event, context) {
   });
 }
 
+async function updateTableStaff(tableId, staffIds, openid) {
+  await assertAdmin(openid);
+  const normalizedId = normalizeTableId(tableId);
+  if (!tables.some((table) => table.id === normalizedId)) {
+    throw new Error('桌号无效');
+  }
+  const normalizedStaffIds = commissionRules.normalizeStaffIds(staffIds);
+  if (!normalizedStaffIds.length) {
+    throw new Error('请至少绑定一位在台游戏师');
+  }
+  return db.runTransaction(async (transaction) => {
+    const employeesById = await getEmployeesByIds(normalizedStaffIds, transaction);
+    normalizedStaffIds.forEach((employeeId) => {
+      if (!employeesById[employeeId] || !employeesById[employeeId].active) {
+        throw new Error('请选择有效且在职的游戏师');
+      }
+    });
+    const sessionResult = await transaction.collection('bar_sessions')
+      .where({ tableId: normalizedId })
+      .limit(1)
+      .get();
+    let session = sessionResult.data[0] ? { ...sessionResult.data[0] } : null;
+    const now = Date.now();
+    if (!session) {
+      const table = tables.find((entry) => entry.id === normalizedId);
+      session = createSessionRecord(table, now, normalizedStaffIds);
+    } else {
+      delete session._id;
+      const current = commissionRules.normalizeStaffIds(Array.isArray(session.currentStaffIds) ? session.currentStaffIds : []);
+      if (current.length === normalizedStaffIds.length && current.every((id, index) => id === normalizedStaffIds[index])) {
+        return session;
+      }
+      const segments = Array.isArray(session.staffSegments) && session.staffSegments.length
+        ? session.staffSegments.map((segment) => ({
+          ...segment,
+          staffIds: commissionRules.normalizeStaffIds(segment.staffIds || [])
+        }))
+        : [createStaffSegment(current, session.startedAt)];
+      const last = segments[segments.length - 1];
+      if (last.endAt === null || last.endAt === undefined) {
+        last.endAt = now;
+        last.endAtText = formatTime(now);
+      }
+      session = {
+        ...session,
+        currentStaffIds: normalizedStaffIds,
+        staffSegments: [...segments, createStaffSegment(normalizedStaffIds, now)]
+      };
+    }
+    await transaction.collection('bar_sessions').doc(normalizedId).set({ data: session });
+    return session;
+  });
+}
+
 async function settleTable(tableId, openid, expected) {
-  assertAdmin(openid);
+  await assertAdmin(openid);
   if (!expected || typeof expected.sessionId !== 'string' || !Number.isFinite(expected.totalAmount)) {
     throw new Error('请先打开买单账单核对金额后再确认收款');
   }
@@ -344,11 +505,15 @@ async function settleTable(tableId, openid, expected) {
     if (!session) {
       throw new Error('该桌当前没有进行中的消费');
     }
-
-    const charges = serviceFeeFor(session.startedAt, now);
-    const itemTotal = Number(session.itemTotal || 0);
-    if (session.id !== expected.sessionId || itemTotal + charges.serviceFee !== expected.totalAmount) {
+    const orders = await getSessionOrders(session.id, true);
+    const employeesById = await getEmployeesByIds(collectSessionEmployeeIds(session, orders), transaction);
+    const summary = commissionRules.summarizeSession(session, orders, now, hourlyServiceFee, employeesById);
+    if (session.id !== expected.sessionId ||
+        commissionRules.cents(summary.totalAmount) !== commissionRules.cents(expected.totalAmount)) {
       throw new Error('账单已变化，请重新打开买单账单核对金额后再确认收款');
+    }
+    if (expected.commissionAmountCents !== summary.commission.amountCents) {
+      throw new Error('提成金额已变化，请重新打开买单账单核对');
     }
     const settlement = {
       id: createId('C'),
@@ -359,16 +524,241 @@ async function settleTable(tableId, openid, expected) {
       startedAtText: session.startedAtText,
       closedAt: now,
       closedAtText: formatTime(now),
-      elapsedMs: charges.elapsedMs,
-      elapsedText: charges.elapsedText,
-      billableHours: charges.billableHours,
-      itemTotal,
-      serviceFee: charges.serviceFee,
-      totalAmount: itemTotal + charges.serviceFee
+      elapsedMs: summary.elapsedMs,
+      elapsedText: formatDuration(summary.elapsedMs),
+      itemTotal: summary.itemTotal,
+      serviceFee: summary.serviceFee,
+      totalAmount: summary.totalAmount,
+      currentStaffCount: summary.currentStaffCount,
+      staffSegments: summary.staffSegments,
+      commission: commissionRules.settleCommission(summary.commission, Object.values(employeesById))
     };
     await transaction.collection('bar_settlements').doc(settlement.id).set({ data: settlement });
     await transaction.collection('bar_sessions').doc(normalizedId).remove();
     return settlement;
+  });
+}
+
+async function getAdminProfile(openid) {
+  const ownerOpenid = getOwnerOpenid();
+  return {
+    isAdmin: await isAdmin(openid),
+    isOwner: isOwner(openid),
+    ownerOpenid,
+    ownerMaskedOpenid: maskOpenid(ownerOpenid)
+  };
+}
+
+async function listAdminMembers(openid) {
+  await assertAdmin(openid);
+  const members = [];
+  let page = [];
+  do {
+    const result = await db.collection('bar_admin_members')
+      .orderBy('joinedAt', 'asc')
+      .skip(members.length)
+      .limit(100)
+      .get();
+    page = result.data.filter((entry) => entry.status !== 'removed');
+    members.push(...page);
+  } while (page.length === 100);
+
+  return [
+    {
+      openid: getOwnerOpenid(),
+      maskedOpenid: maskOpenid(getOwnerOpenid()),
+      role: 'owner',
+      roleText: '唯一管理员',
+      joinedAtText: '环境变量初始化',
+      removable: false
+    },
+    ...members.map((member) => ({
+      openid: member.openid,
+      maskedOpenid: maskOpenid(member.openid),
+      role: 'member',
+      roleText: '后台成员',
+      joinedAt: member.joinedAt,
+      joinedAtText: member.joinedAtText,
+      invitedBy: member.invitedBy,
+      removable: true
+    }))
+  ];
+}
+
+async function createAdminInvite(openid) {
+  assertOwner(openid);
+  const code = randomInviteCode();
+  const createdAt = Date.now();
+  const expiresAt = createdAt + adminInviteTtlMs;
+  const envVersion = 'release';
+  const invite = {
+    code,
+    status: 'pending',
+    createdBy: openid,
+    createdAt,
+    createdAtText: formatTime(createdAt),
+    expiresAt,
+    expiresAtText: formatTime(expiresAt),
+    fileID: ''
+  };
+  await db.collection('bar_admin_invites').doc(code).set({ data: invite });
+
+  try {
+    const qr = await cloud.openapi.wxacode.getUnlimited({
+      page: 'pages/entry/entry',
+      scene: `admin_invite=${code}`,
+      envVersion,
+      checkPath: true,
+      width: 430
+    });
+    if (!qr || (qr.errCode && qr.errCode !== 0) || !qr.buffer || typeof qr.buffer.length !== 'number' || !qr.buffer.length) {
+      throw new Error(`WeChat code generation failed: ${qr && qr.errMsg ? qr.errMsg : 'no image returned'}`);
+    }
+    const uploaded = await cloud.uploadFile({
+      cloudPath: `qrcode/admin-invites/${envVersion}/${code}.png`,
+      fileContent: qr.buffer
+    });
+    if (!uploaded || !uploaded.fileID) {
+      throw new Error('Cloud upload did not return a fileID');
+    }
+    const links = await cloud.getTempFileURL({ fileList: [uploaded.fileID] });
+    const file = links && links.fileList && links.fileList[0];
+    if (!file || file.status !== 0 || !file.tempFileURL) {
+      throw new Error(`Download URL unavailable: ${file && file.errMsg ? file.errMsg : 'no URL returned'}`);
+    }
+    invite.fileID = uploaded.fileID;
+    invite.qrCodeUrl = file.tempFileURL;
+    await db.collection('bar_admin_invites').doc(code).update({ data: { fileID: uploaded.fileID } });
+  } catch (error) {
+    console.error('Admin invite QR generation failed', { openid, code, error });
+    invite.qrCodeUrl = '';
+  }
+  return invite;
+}
+
+async function acceptAdminInvite(code, openid) {
+  if (typeof code !== 'string' || !code.trim()) {
+    throw new Error('邀请码无效');
+  }
+  if (!openid) {
+    throw new Error('当前微信账号无效');
+  }
+  if (isOwner(openid)) {
+    return { joined: false, role: 'owner' };
+  }
+  const existing = await getAdminMember(openid);
+  if (existing) {
+    return { joined: false, role: 'member' };
+  }
+  const inviteCode = code.trim().toUpperCase();
+  return db.runTransaction(async (transaction) => {
+    const inviteDoc = transaction.collection('bar_admin_invites').doc(inviteCode);
+    const result = await inviteDoc.get();
+    const invite = result.data;
+    if (!invite || invite.status !== 'pending') {
+      throw new Error('邀请码无效或已失效');
+    }
+    if (Number(invite.expiresAt) < Date.now()) {
+      throw new Error('邀请码已过期');
+    }
+    const memberDoc = transaction.collection('bar_admin_members').doc(openid);
+    const member = {
+      openid,
+      status: 'active',
+      invitedBy: invite.createdBy,
+      joinedAt: Date.now(),
+      joinedAtText: formatTime(Date.now())
+    };
+    await memberDoc.set({ data: member });
+    await inviteDoc.update({ data: { status: 'used', usedBy: openid, usedAt: Date.now(), usedAtText: formatTime(Date.now()) } });
+    return { joined: true, role: 'member' };
+  });
+}
+
+async function removeAdminMember(targetOpenid, openid) {
+  assertOwner(openid);
+  if (typeof targetOpenid !== 'string' || !targetOpenid.trim()) {
+    throw new Error('后台成员无效');
+  }
+  const normalized = targetOpenid.trim();
+  if (isOwner(normalized)) {
+    throw new Error('唯一管理员不能被移除');
+  }
+  const document = db.collection('bar_admin_members').doc(normalized);
+  const result = await document.get();
+  if (!result.data || result.data.status === 'removed') {
+    throw new Error('后台成员不存在');
+  }
+  await document.update({ data: { status: 'removed', removedAt: Date.now(), removedAtText: formatTime(Date.now()), removedBy: openid } });
+  return { success: true };
+}
+
+async function listEmployees(openid) {
+  await assertAdmin(openid);
+  const employees = [];
+  let page;
+  do {
+    const result = await db.collection('bar_employees').orderBy('createdAt', 'asc')
+      .skip(employees.length).limit(100).get();
+    page = result.data;
+    employees.push(...page);
+  } while (page.length === 100);
+  return employees;
+}
+
+async function saveEmployee(input, openid) {
+  await assertAdmin(openid);
+  const fields = commissionRules.employeeInput(input);
+  const now = Date.now();
+  const id = input.id || createId('E');
+  return db.runTransaction(async (transaction) => {
+    let existing = null;
+    if (input.id) {
+      const result = await transaction.collection('bar_employees').doc(id).get();
+      existing = result.data;
+      if (!existing) throw new Error('游戏师不存在');
+    }
+    const employee = {
+      id, ...fields, createdAt: existing ? existing.createdAt : now,
+      updatedAt: now, updatedBy: openid
+    };
+    await transaction.collection('bar_employees').doc(id).set({ data: employee });
+    return employee;
+  });
+}
+
+async function listCommissionSettlements(event, openid) {
+  await assertAdmin(openid);
+  const offset = event.offset === undefined ? 0 : event.offset;
+  if (!Number.isSafeInteger(offset) || offset < 0 || !['pending', 'all'].includes(event.filter)) {
+    throw new Error('提成记录查询参数无效');
+  }
+  let query = db.collection('bar_settlements');
+  if (event.filter === 'pending') query = query.where({ 'commission.payoutStatus': 'pending' });
+  const result = await query.orderBy('closedAt', 'desc').orderBy('id', 'desc')
+    .skip(offset).limit(20).get();
+  return { records: result.data, nextOffset: offset + result.data.length, hasMore: result.data.length === 20 };
+}
+
+async function markCommissionPaid(settlementId, openid) {
+  await assertAdmin(openid);
+  if (typeof settlementId !== 'string' || !settlementId) throw new Error('买单号无效');
+  return db.runTransaction(async (transaction) => {
+    const document = transaction.collection('bar_settlements').doc(settlementId);
+    const result = await document.get();
+    const settlement = result.data;
+    if (!settlement || !settlement.commission ||
+        !['pending', 'paid'].includes(settlement.commission.payoutStatus)) {
+      throw new Error('该买单记录没有待发放提成');
+    }
+    if (settlement.commission.payoutStatus === 'paid') return settlement;
+    const paidAt = Date.now();
+    const commission = {
+      ...settlement.commission, payoutStatus: 'paid', paidAt,
+      paidAtText: formatTime(paidAt), paidBy: openid
+    };
+    await document.update({ data: { commission } });
+    return { ...settlement, commission };
   });
 }
 
@@ -383,14 +773,30 @@ exports.main = async (event) => {
       data = await getCustomerSession(event.tableId, event.sessionId);
       break;
     case 'isAdmin':
-      data = isAdmin(context.OPENID);
+      data = await isAdmin(context.OPENID);
+      break;
+    case 'getAdminProfile':
+      data = await getAdminProfile(context.OPENID);
+      break;
+    case 'listAdminMembers':
+      data = await listAdminMembers(context.OPENID);
+      break;
+    case 'createAdminInvite':
+      data = await createAdminInvite(context.OPENID);
+      break;
+    case 'acceptAdminInvite':
+      data = await acceptAdminInvite(event.code, context.OPENID);
+      break;
+    case 'removeAdminMember':
+      data = await removeAdminMember(event.openid, context.OPENID);
       break;
     case 'getOrder':
       data = await getOrder(event.orderId, context.OPENID);
       break;
     case 'submitOrder':
       data = await submitOrder(event, context);
-      await require('./order-notifications').notifyAdmins(cloud, data, process.env.ADMIN_OPENIDS);
+      await require('./order-notifications').notifyWecomRobot(data, process.env.WECOM_WEBHOOK_URL);
+      data = publicOrder(data);
       break;
     case 'getDashboard':
       data = await getDashboard(context.OPENID);
@@ -398,8 +804,23 @@ exports.main = async (event) => {
     case 'getTableDetail':
       data = await getTableDetail(event.tableId, context.OPENID);
       break;
+    case 'updateTableStaff':
+      data = await updateTableStaff(event.tableId, event.staffIds, context.OPENID);
+      break;
     case 'settleTable':
       data = await settleTable(event.tableId, context.OPENID, event.expected);
+      break;
+    case 'listEmployees':
+      data = await listEmployees(context.OPENID);
+      break;
+    case 'saveEmployee':
+      data = await saveEmployee(event.employee, context.OPENID);
+      break;
+    case 'listCommissionSettlements':
+      data = await listCommissionSettlements(event, context.OPENID);
+      break;
+    case 'markCommissionPaid':
+      data = await markCommissionPaid(event.settlementId, context.OPENID);
       break;
     default:
       throw new Error('未知的云端操作');

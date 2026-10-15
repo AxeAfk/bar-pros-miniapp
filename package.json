@@ -4,6 +4,7 @@
   "private": true,
   "description": "酒吧扫码点单收银微信小程序",
   "scripts": {
+    "sync:commission": "node -e \"require('fs').copyFileSync('utils/commission.js', 'cloudfunctions/barApi/commission.js')\"",
     "check": "node -e \"console.log('Open this project with WeChat DevTools to build and preview.')\"",
     "preview": "python3 -m http.server 5173 -d preview",
     "upload": "node scripts/upload.js"

@@ -24,7 +24,7 @@
   <view wx:if="{{session}}" class="section">
     <view class="row"><text>已消费时长</text><text>{{session.elapsedText}}</text></view>
     <view class="row bill-line"><text>商品 / 小吃累计</text><text>{{session.itemTotalText}}</text></view>
-    <view class="row bill-line"><text>时长服务费（{{session.billableHours}} 小时）</text><text>{{session.serviceFeeText}}</text></view>
+    <view class="row bill-line"><text>时长服务费（动态计时）</text><text>{{session.serviceFeeText}}</text></view>
     <view class="row total">
       <text>当前累计金额</text>
       <text class="price">{{session.totalText}}</text>

@@ -1,7 +1,6 @@
 module.exports = {
   cloudEnvId: 'cloud1-d0gaix12o534b4daf',
   storageMode: 'cloud',
-  orderNotificationTemplateId: 'wO1VECzgDEqinluVIXOxcNb_GLUca7AV2txXiMth0Mk',
   releaseMode: 'personal',
   hourlyServiceFee: 99,
   memberRechargeEnabled: false,

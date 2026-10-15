@@ -35,7 +35,8 @@ test('cloud pricing catalog matches the customer catalog without reusing retired
   const cloud = { init() {}, database: () => ({}) };
   const context = {
     exports: {},
-    require: (id) => id === 'wx-server-sdk' ? cloud : require(id)
+    require: (id) => id === 'wx-server-sdk' ? cloud
+      : require(id.startsWith('.') ? path.join(__dirname, '..', 'cloudfunctions', 'barApi', id) : id)
   };
   const source = fs.readFileSync(
     path.join(__dirname, '..', 'cloudfunctions', 'barApi', 'index.js'), 'utf8'

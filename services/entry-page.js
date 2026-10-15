@@ -1,5 +1,5 @@
 const store = require('./store');
-const { getEntryTableId } = require('../utils/entry');
+const { getEntryParams } = require('../utils/entry');
 
 module.exports = {
   data: {
@@ -25,10 +25,17 @@ module.exports = {
     try {
       const app = getApp();
       const pendingTableId = app.consumeEntryTableId();
-      const tableId = getEntryTableId(this.entryOptions) || pendingTableId;
+      const entry = getEntryParams(this.entryOptions);
+      const tableId = entry.tableId || pendingTableId;
       this.entryOptions = {};
       if (tableId) {
         this.openTable(tableId);
+        return;
+      }
+      if (entry.adminInvite) {
+        await store.acceptAdminInvite(entry.adminInvite);
+        wx.showToast({ title: '已加入后台成员' });
+        this.redirect('/pages/admin/admin');
         return;
       }
       if (await store.isAdmin()) {
@@ -77,10 +84,19 @@ module.exports = {
         try {
           const path = result.path || result.result || '';
           const queryStart = path.indexOf('?');
-          const tableId = queryStart >= 0
-            ? getEntryTableId({ scene: path.slice(queryStart + 1) })
-            : getEntryTableId({ scene: path });
-          this.openTable(tableId);
+          const entry = queryStart >= 0
+            ? getEntryParams({ scene: path.slice(queryStart + 1) })
+            : getEntryParams({ scene: path });
+          if (entry.tableId) {
+            this.openTable(entry.tableId);
+            return;
+          }
+          if (entry.adminInvite) {
+            this.entryOptions = { admin_invite: entry.adminInvite };
+            this.resolveEntry();
+            return;
+          }
+          throw new Error('invalid');
         } catch (error) {
           wx.showToast({ title: '二维码无效，请扫描桌面上的小程序码', icon: 'none' });
         }

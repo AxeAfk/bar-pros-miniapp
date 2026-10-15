@@ -1,6 +1,33 @@
 const store = require('../../services/store');
 const { formatMoney } = require('../../utils/format');
-const { orderNotificationTemplateId } = require('../../config/app');
+const { commissionView, itemCommissionText } = require('../../utils/commission-display');
+
+function formatOrder(order) {
+  return {
+    ...order,
+    totalText: formatMoney(order.totalAmount),
+    items: order.items.map((item) => ({
+      ...item,
+      commissionText: itemCommissionText(item),
+      lineTotalText: formatMoney(item.price * item.quantity),
+      unitPriceText: formatMoney(item.price)
+    }))
+  };
+}
+
+function formatSummary(summary) {
+  return {
+    ...summary,
+    itemTotalText: formatMoney(summary.itemTotal),
+    serviceFeeText: formatMoney(summary.serviceFee),
+    totalText: formatMoney(summary.totalAmount),
+    currentStaffText: summary.currentStaff && summary.currentStaff.length
+      ? summary.currentStaff.map((entry) => entry.name).join('、')
+      : '未绑定',
+    commissionView: commissionView(summary.commission),
+    orders: summary.orders.map(formatOrder)
+  };
+}
 
 Page({
   data: {
@@ -16,7 +43,9 @@ Page({
     tableDetail: null,
     checkoutBill: null,
     checkoutLoading: false,
-    settling: false
+    settling: false,
+    showCommission: false,
+    staffing: null
   },
 
   onShow() {
@@ -42,25 +71,6 @@ Page({
     }
   },
 
-  subscribeOrders() {
-    wx.requestSubscribeMessage({
-      tmplIds: [orderNotificationTemplateId],
-      success: (result) => {
-        wx.showModal({
-          title: result[orderNotificationTemplateId] === 'accept' ? '已同意接单提醒' : '未开启接单提醒',
-          content: result[orderNotificationTemplateId] === 'accept'
-            ? '若为一次性模板，本次订阅仅增加一次通知机会。请在额度用完前再次点击订阅；“总是允许”不代表无限次接收。'
-            : '请允许订阅该模板。若此前拒收，可在小程序设置中调整后重新订阅。',
-          showCancel: false
-        });
-      },
-      fail: (error) => {
-        console.error('Order subscription failed', error);
-        wx.showToast({ title: '订阅失败，请检查模板配置与微信设置', icon: 'none' });
-      }
-    });
-  },
-
   refresh() {
     if (this.dashboardRequestPending) {
       return Promise.resolve(false);
@@ -70,7 +80,8 @@ Page({
       const tables = snapshot.tables.map((table) => ({
         ...table,
         statusText: table.status === 'using' ? '占用中' : '空闲',
-        totalText: formatMoney(table.totalAmount || 0)
+        totalText: formatMoney(table.totalAmount || 0),
+        serviceFeeText: formatMoney(table.serviceFee || 0)
       }));
       const orders = snapshot.orders.map((order) => ({
         ...order,
@@ -87,44 +98,23 @@ Page({
       const detailRequest = selected && selected.status === 'using'
         ? store.getTableDetail(selected.id)
         : Promise.resolve(null);
-      return detailRequest.then((summary) => ({
-        stats: snapshot.stats,
-        tables,
-        orders,
-        settlements: snapshot.settlements,
-        summary
-      }));
-    }).then((snapshot) => {
-      const summary = snapshot.summary;
-      const tableDetail = summary ? {
-        ...summary,
-        itemTotalText: formatMoney(summary.itemTotal),
-        serviceFeeText: formatMoney(summary.serviceFee),
-        totalText: formatMoney(summary.totalAmount),
-        orders: summary.orders.map((order) => ({
-          ...order,
-          totalText: formatMoney(order.totalAmount),
-          items: order.items.map((item) => ({
-            ...item,
-            lineTotalText: formatMoney(item.price * item.quantity),
-            unitPriceText: formatMoney(item.price)
-          }))
-        }))
-      } : null;
+      return detailRequest.then((summary) => ({ snapshot, tables, orders, summary }));
+    }).then(({ snapshot, tables, orders, summary }) => {
       this.setData({
         stats: {
           orderCount: snapshot.stats.orderCount,
           revenueText: formatMoney(snapshot.stats.revenue)
         },
-        tables: snapshot.tables,
-        tableDetail,
-        orders: snapshot.orders,
+        tables,
+        tableDetail: summary ? formatSummary(summary) : null,
+        orders,
         settlements: snapshot.settlements.map((settlement) => ({
           ...settlement,
           recordId: settlement.id || settlement.sessionId,
           totalText: formatMoney(settlement.totalAmount),
           itemTotalText: formatMoney(settlement.itemTotal),
-          serviceFeeText: formatMoney(settlement.serviceFee)
+          serviceFeeText: formatMoney(settlement.serviceFee),
+          commissionView: commissionView(settlement.commission)
         }))
       });
       this._dashboardErrorShown = false;
@@ -165,6 +155,74 @@ Page({
     });
   },
 
+  openStaff() {
+    wx.navigateTo({ url: '/pages/staff/staff' });
+  },
+
+  async openStaffing(event) {
+    const tableId = event.currentTarget.dataset.tableId || this.data.selectedTableId;
+    const table = this.data.tables.find((entry) => entry.id === tableId) || store.getTableById(tableId);
+    if (!table) {
+      wx.showToast({ title: '桌号无效', icon: 'none' });
+      return;
+    }
+    try {
+      const [employees, summary] = await Promise.all([
+        store.listEmployees(),
+        table.status === 'using' ? store.getTableDetail(tableId) : Promise.resolve(null)
+      ]);
+      const activeEmployees = employees.filter((employee) => employee.active);
+      const selectedIds = summary && Array.isArray(summary.currentStaff)
+        ? summary.currentStaff.map((entry) => entry.id)
+        : [];
+      this.setData({
+        staffing: {
+          tableId,
+          tableName: table.name,
+          selectedIds,
+          employees: activeEmployees,
+          saving: false
+        }
+      });
+    } catch (error) {
+      wx.showToast({ title: error.message || '游戏师列表读取失败', icon: 'none' });
+    }
+  },
+
+  closeStaffing() {
+    if (!this.data.staffing || this.data.staffing.saving) return;
+    this.setData({ staffing: null });
+  },
+
+  toggleStaffOption(event) {
+    const staffing = this.data.staffing;
+    if (!staffing || staffing.saving) return;
+    const employeeId = event.currentTarget.dataset.id;
+    const selected = staffing.selectedIds.includes(employeeId)
+      ? staffing.selectedIds.filter((id) => id !== employeeId)
+      : [...staffing.selectedIds, employeeId];
+    this.setData({ staffing: { ...staffing, selectedIds: selected } });
+  },
+
+  async saveStaffing() {
+    const staffing = this.data.staffing;
+    if (!staffing || staffing.saving) return;
+    if (!staffing.selectedIds.length) {
+      wx.showToast({ title: '请至少绑定一位在台游戏师', icon: 'none' });
+      return;
+    }
+    this.setData({ staffing: { ...staffing, saving: true } });
+    try {
+      await store.saveTableStaff(staffing.tableId, staffing.selectedIds);
+      wx.showToast({ title: '游戏师绑定已更新' });
+      this.setData({ staffing: null, selectedTableId: staffing.tableId });
+      await this.refresh();
+    } catch (error) {
+      wx.showToast({ title: error.message || '游戏师绑定失败', icon: 'none' });
+      this.setData({ staffing: { ...staffing, saving: false } });
+    }
+  },
+
   async checkout(event) {
     if (this.data.checkoutLoading || this.data.settling) {
       return;
@@ -179,20 +237,8 @@ Page({
         throw new Error('该桌当前没有进行中的消费');
       }
       this.setData({
-        checkoutBill: {
-          ...summary,
-          itemTotalText: formatMoney(summary.itemTotal),
-          serviceFeeText: formatMoney(summary.serviceFee),
-          totalText: formatMoney(summary.totalAmount),
-          orders: summary.orders.map((order) => ({
-            ...order,
-            items: order.items.map((item) => ({
-              ...item,
-              unitPriceText: formatMoney(item.price),
-              lineTotalText: formatMoney(item.price * item.quantity)
-            }))
-          }))
-        }
+        showCommission: false,
+        checkoutBill: formatSummary(summary)
       });
     } catch (error) {
       wx.showToast({ title: error.message || '账单读取失败', icon: 'none' });
@@ -209,23 +255,38 @@ Page({
 
   closeNothing() {},
 
+  toggleCommission() {
+    this.setData({ showCommission: !this.data.showCommission });
+  },
+
   async confirmPayment() {
     const bill = this.data.checkoutBill;
     if (!bill || this.data.settling) {
+      return;
+    }
+    if (bill.commission && bill.commission.status !== 'complete') {
+      this.setData({ showCommission: true });
+      wx.showToast({ title: commissionView(bill.commission).warning || '当前提成还不能结算', icon: 'none' });
       return;
     }
     this.setData({ settling: true });
     try {
       await store.settleTable(bill.tableId, {
         sessionId: bill.id,
-        totalAmount: bill.totalAmount
+        totalAmount: bill.totalAmount,
+        commissionAmountCents: bill.commission ? bill.commission.amountCents : 0
       });
       this.setData({
         checkoutBill: null,
         selectedTableId: '',
         tableDetail: null,
         tables: this.data.tables.map((table) => table.id === bill.tableId ? {
-          ...table, status: 'idle', statusText: '空闲', elapsedText: '', totalAmount: 0, totalText: formatMoney(0)
+          ...table,
+          status: 'idle',
+          statusText: '空闲',
+          elapsedText: '',
+          totalAmount: 0,
+          totalText: formatMoney(0)
         } : table)
       });
       wx.showToast({ title: '已收款，桌位已清台' });

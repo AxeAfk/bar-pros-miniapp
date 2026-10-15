@@ -1,0 +1,346 @@
+const defaultRateBps = 2000;
+const version = 2;
+const hourMs = 60 * 60 * 1000;
+
+function sumCents(values) {
+  const total = values.reduce((sum, value) => {
+    if (!Number.isSafeInteger(value) || value < 0) throw new Error('提成金额数据无效');
+    return sum + value;
+  }, 0);
+  if (!Number.isSafeInteger(total)) throw new Error('提成金额超出计算范围');
+  return total;
+}
+
+function cents(value) {
+  if (!Number.isFinite(value) || value < 0 || !Number.isSafeInteger(Math.round(value * 100)) ||
+      Math.abs(value * 100 - Math.round(value * 100)) > 0.000001) {
+    throw new Error('金额必须为非负数且最多保留两位小数');
+  }
+  return Math.round(value * 100);
+}
+
+function checkRate(rateBps) {
+  if (!Number.isInteger(rateBps) || rateBps < 0 || rateBps > 10000) {
+    throw new Error('提成比例必须在 0% 至 100% 之间，最多保留两位小数');
+  }
+  return rateBps;
+}
+
+function calculate(amountCents, rateBps) {
+  checkRate(rateBps);
+  const scaled = amountCents * rateBps;
+  if (!Number.isSafeInteger(amountCents) || amountCents < 0 || !Number.isSafeInteger(scaled)) {
+    throw new Error('提成金额超出计算范围');
+  }
+  return Math.round(scaled / 10000);
+}
+
+function normalizeStaffIds(staffIds) {
+  if (!Array.isArray(staffIds)) throw new Error('游戏师列表无效');
+  const seen = new Set();
+  return staffIds.map((value) => {
+    if (typeof value !== 'string' || !value.trim()) throw new Error('游戏师列表无效');
+    return value.trim();
+  }).filter((value) => {
+    if (seen.has(value)) return false;
+    seen.add(value);
+    return true;
+  });
+}
+
+function normalizeProductCommission(product) {
+  const rule = product && product.commission ? product.commission : null;
+  const scope = !rule ? 'shared'
+    : rule.scope || (rule.kind === 'special' ? 'designated' : rule.kind === 'default' ? 'shared' : '');
+  if (!['shared', 'designated'].includes(scope)) {
+    throw new Error('商品提成配置无效');
+  }
+  return {
+    scope,
+    rateBps: checkRate(rule && rule.rateBps !== undefined ? rule.rateBps : defaultRateBps)
+  };
+}
+
+function itemCommission(product, quantity, designatedStaffId) {
+  if (!Number.isInteger(quantity) || quantity < 1 || quantity > 99) {
+    throw new Error('商品数量必须为 1 至 99 的整数');
+  }
+  const { scope, rateBps } = normalizeProductCommission(product);
+  const result = {
+    version,
+    scope,
+    rateBps,
+    amountCents: calculate(cents(product.price) * quantity, rateBps)
+  };
+  if (scope === 'designated') {
+    if (designatedStaffId !== undefined && designatedStaffId !== null && designatedStaffId !== '') {
+      if (typeof designatedStaffId !== 'string' || !designatedStaffId.trim()) {
+        throw new Error('特殊商品指定游戏师无效');
+      }
+      result.designatedStaffId = designatedStaffId.trim();
+    }
+  }
+  return result;
+}
+
+function orderCommission(items) {
+  const amountCents = sumCents(items.map((item) => item.commission.amountCents));
+  return { version, amountCents };
+}
+
+function orderTotalCents(order) {
+  if (order && Number.isFinite(order.totalAmount)) return cents(order.totalAmount);
+  return sumCents((order.items || []).map((item) => cents(item.price) * item.quantity));
+}
+
+function ensureAllocation(map, order, employeeId, employeeName) {
+  if (!map.has(employeeId)) {
+    map.set(employeeId, {
+      employeeId,
+      employeeName: employeeName || '',
+      serviceAmountCents: 0,
+      goodsSharedAmountCents: 0,
+      specialAmountCents: 0,
+      amountCents: 0,
+      specialItems: []
+    });
+  }
+  const entry = map.get(employeeId);
+  if (!entry.employeeName && employeeName) entry.employeeName = employeeName;
+  return entry;
+}
+
+function distributeEvenly(amountCents, staffIds, employeesById, target, field) {
+  if (!Number.isSafeInteger(amountCents) || amountCents < 0) throw new Error('提成金额数据无效');
+  const ids = normalizeStaffIds(staffIds);
+  if (!ids.length) return [];
+  const base = Math.floor(amountCents / ids.length);
+  let remainder = amountCents - base * ids.length;
+  return ids.map((employeeId) => {
+    const allocation = base + (remainder > 0 ? 1 : 0);
+    if (remainder > 0) remainder -= 1;
+    const record = ensureAllocation(target, null, employeeId, employeesById[employeeId] && employeesById[employeeId].name);
+    record[field] += allocation;
+    record.amountCents += allocation;
+    return { employeeId, amountCents: allocation };
+  });
+}
+
+function readOrderItemCommission(item) {
+  if (!item || !item.commission) {
+    return itemCommission({ price: item.price }, item.quantity);
+  }
+  const scope = item.commission.scope || (item.commission.kind === 'special' ? 'designated' : 'shared');
+  return {
+    version: item.commission.version || 1,
+    scope,
+    rateBps: checkRate(item.commission.rateBps === undefined ? defaultRateBps : item.commission.rateBps),
+    amountCents: Number.isSafeInteger(item.commission.amountCents)
+      ? item.commission.amountCents
+      : calculate(cents(item.price) * item.quantity, item.commission.rateBps === undefined ? defaultRateBps : item.commission.rateBps),
+    designatedStaffId: item.commission.designatedStaffId || ''
+  };
+}
+
+function serviceSegments(session, now, hourlyServiceFee) {
+  const source = Array.isArray(session.staffSegments) && session.staffSegments.length
+    ? session.staffSegments
+    : [{
+      startAt: session.startedAt,
+      startAtText: '',
+      endAt: null,
+      endAtText: '',
+      staffIds: Array.isArray(session.currentStaffIds) ? session.currentStaffIds : []
+    }];
+  let currentStaffCount = 0;
+  let currentServiceRateCentsPerHour = 0;
+  let serviceFeeCents = 0;
+  const participants = [];
+  const seen = new Set();
+  const segments = source.map((segment) => {
+    const staffIds = normalizeStaffIds(Array.isArray(segment.staffIds) ? segment.staffIds : []);
+    const startAt = Number(segment.startAt) || session.startedAt || now;
+    const endAt = segment.endAt === null || segment.endAt === undefined ? now : Number(segment.endAt);
+    const elapsedMs = Math.max(0, endAt - startAt);
+    const staffCount = staffIds.length;
+    const feeCents = Math.round(elapsedMs * hourlyServiceFee * 100 * staffCount / hourMs);
+    serviceFeeCents += feeCents;
+    if (segment.endAt === null || segment.endAt === undefined) {
+      currentStaffCount = staffCount;
+      currentServiceRateCentsPerHour = hourlyServiceFee * 100 * staffCount;
+    }
+    staffIds.forEach((employeeId) => {
+      if (!seen.has(employeeId)) {
+        seen.add(employeeId);
+        participants.push(employeeId);
+      }
+    });
+    return {
+      startAt,
+      startAtText: segment.startAtText || '',
+      endAt: segment.endAt === null || segment.endAt === undefined ? null : endAt,
+      endAtText: segment.endAtText || '',
+      elapsedMs,
+      staffIds,
+      staffCount,
+      serviceFeeCents: feeCents,
+      serviceFee: feeCents / 100
+    };
+  });
+  return {
+    segments,
+    participantStaffIds: participants,
+    currentStaffCount,
+    currentServiceRateCentsPerHour,
+    serviceFeeCents
+  };
+}
+
+function summarizeCommission(session, orders, details, employeesById = {}) {
+  const allocationMap = new Map();
+  const sharedItems = [];
+  const specialItems = [];
+  const unassignedItems = [];
+  let goodsSharedAmountCents = 0;
+  let specialAmountCents = 0;
+  const serviceBreakdown = details.segments.map((segment) => {
+    const amountCents = calculate(segment.serviceFeeCents, defaultRateBps);
+    const allocations = segment.staffIds.length
+      ? distributeEvenly(amountCents, segment.staffIds, employeesById, allocationMap, 'serviceAmountCents')
+      : [];
+    return {
+      ...segment,
+      commissionRateBps: defaultRateBps,
+      amountCents,
+      allocations
+    };
+  });
+
+  orders.forEach((order) => {
+    (order.items || []).forEach((item) => {
+      const commission = readOrderItemCommission(item);
+      const line = {
+        orderId: order.id,
+        productId: item.productId,
+        name: item.name,
+        quantity: item.quantity,
+        totalAmountCents: cents(item.price) * item.quantity,
+        amountCents: commission.amountCents,
+        rateBps: commission.rateBps
+      };
+      if (commission.scope === 'designated') {
+        specialAmountCents += commission.amountCents;
+        if (!commission.designatedStaffId) {
+          unassignedItems.push(line);
+          return;
+        }
+        const record = ensureAllocation(allocationMap, order, commission.designatedStaffId,
+          employeesById[commission.designatedStaffId] && employeesById[commission.designatedStaffId].name);
+        record.specialAmountCents += commission.amountCents;
+        record.amountCents += commission.amountCents;
+        record.specialItems.push({
+          orderId: order.id,
+          productId: item.productId,
+          name: item.name,
+          quantity: item.quantity,
+          amountCents: commission.amountCents,
+          rateBps: commission.rateBps
+        });
+        specialItems.push({ ...line, designatedStaffId: commission.designatedStaffId });
+        return;
+      }
+      goodsSharedAmountCents += commission.amountCents;
+      sharedItems.push(line);
+    });
+  });
+
+  if (goodsSharedAmountCents > 0 && details.participantStaffIds.length) {
+    distributeEvenly(goodsSharedAmountCents, details.participantStaffIds, employeesById, allocationMap, 'goodsSharedAmountCents');
+  }
+
+  const status = unassignedItems.length ? 'pending_special_assignment'
+    : goodsSharedAmountCents > 0 && !details.participantStaffIds.length ? 'pending_staff'
+      : 'complete';
+  const amountCents = sumCents([goodsSharedAmountCents, specialAmountCents,
+    sumCents(serviceBreakdown.map((segment) => segment.amountCents))]);
+  const allocations = Array.from(allocationMap.values()).map((entry) => ({
+    ...entry,
+    employeeName: entry.employeeName || entry.employeeId
+  }));
+  return {
+    version,
+    status,
+    goodsSharedAmountCents,
+    specialAmountCents,
+    goodsAmountCents: sumCents([goodsSharedAmountCents, specialAmountCents]),
+    serviceAmountCents: sumCents(serviceBreakdown.map((segment) => segment.amountCents)),
+    amountCents,
+    participantStaffIds: details.participantStaffIds,
+    currentStaffCount: details.currentStaffCount,
+    allocations,
+    sharedItems,
+    specialItems,
+    unassignedItems,
+    serviceSegments: serviceBreakdown
+  };
+}
+
+function summarizeSession(session, orders, now, hourlyServiceFee, employeesById = {}) {
+  const details = serviceSegments(session, now, hourlyServiceFee);
+  const itemTotalCents = sumCents((orders || []).map(orderTotalCents));
+  const commission = summarizeCommission(session, orders || [], details, employeesById);
+  return {
+    pricedAt: now,
+    elapsedMs: Math.max(0, now - session.startedAt),
+    itemTotal: itemTotalCents / 100,
+    itemTotalCents,
+    serviceFee: details.serviceFeeCents / 100,
+    serviceFeeCents: details.serviceFeeCents,
+    totalAmount: (itemTotalCents + details.serviceFeeCents) / 100,
+    totalAmountCents: itemTotalCents + details.serviceFeeCents,
+    currentStaffCount: details.currentStaffCount,
+    currentServiceRateCentsPerHour: details.currentServiceRateCentsPerHour,
+    staffSegments: details.segments,
+    participantStaffIds: details.participantStaffIds,
+    commission
+  };
+}
+
+function settleCommission(commission, employees) {
+  if (!commission || commission.status !== 'complete') {
+    throw new Error(commission && commission.status === 'pending_special_assignment'
+      ? '存在未指定归属的特殊商品，请先指定提成游戏师后再结账'
+      : '本桌尚未绑定有效游戏师，暂不能完成提成结算');
+  }
+  const directory = Object.fromEntries((employees || []).map((employee) => [employee.id, employee]));
+  return {
+    ...commission,
+    allocations: commission.allocations.map((entry) => ({
+      ...entry,
+      employeeName: directory[entry.employeeId] ? directory[entry.employeeId].name : entry.employeeName
+    })),
+    payoutStatus: commission.amountCents === 0 ? 'not_required' : 'pending'
+  };
+}
+
+function employeeInput(input) {
+  if (!input || typeof input.name !== 'string' || !input.name.trim() ||
+      Array.from(input.name.trim()).length > 30 || typeof input.active !== 'boolean' ||
+      (input.id !== undefined && (typeof input.id !== 'string' || !input.id))) {
+    throw new Error('游戏师姓名不能为空且最多 30 字，并需指定启用状态');
+  }
+  return { name: input.name.trim(), active: input.active };
+}
+
+module.exports = {
+  defaultRateBps,
+  cents,
+  normalizeStaffIds,
+  normalizeProductCommission,
+  itemCommission,
+  orderCommission,
+  summarizeSession,
+  summarizeCommission,
+  settleCommission,
+  employeeInput
+};

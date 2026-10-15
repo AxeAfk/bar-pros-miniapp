@@ -9,7 +9,7 @@ function normalizeTableId(value) {
 function parseScene(scene) {
   const decoded = decodeURIComponent(String(scene || '').trim());
   if (!decoded) {
-    return '';
+    return {};
   }
 
   if (decoded.includes('=')) {
@@ -23,22 +23,40 @@ function parseScene(scene) {
         values[key] = value;
       }
     });
-    return normalizeTableId(values.table_id || values.tableId || values.tid) ||
-      (values.scene ? parseScene(values.scene) : '');
+    const nested = values.scene ? parseScene(values.scene) : {};
+    return {
+      tableId: normalizeTableId(values.table_id || values.tableId || values.tid) || nested.tableId || '',
+      adminInvite: String(values.admin_invite || values.adminInvite || nested.adminInvite || '').trim()
+    };
   }
 
-  return normalizeTableId(decoded);
+  return { tableId: normalizeTableId(decoded), adminInvite: '' };
 }
 
 function getEntryTableId(options) {
-  if (!options) {
-    return '';
-  }
+  if (!options) return '';
+  return getEntryParams(options).tableId;
+}
 
-  return normalizeTableId(options.table_id || options.tableId || options.tid) || parseScene(options.scene);
+function getAdminInviteCode(options) {
+  if (!options) return '';
+  return getEntryParams(options).adminInvite;
+}
+
+function getEntryParams(options) {
+  if (!options) {
+    return { tableId: '', adminInvite: '' };
+  }
+  const scene = parseScene(options.scene);
+  return {
+    tableId: normalizeTableId(options.table_id || options.tableId || options.tid) || scene.tableId || '',
+    adminInvite: String(options.admin_invite || options.adminInvite || scene.adminInvite || '').trim()
+  };
 }
 
 module.exports = {
   getEntryTableId,
+  getAdminInviteCode,
+  getEntryParams,
   normalizeTableId
 };

@@ -26,13 +26,18 @@
     <text class="list-title">酒水与小食</text>
     <text class="secondary-text">{{isAdminOrder ? '代客点单 · ' : ''}}{{productCount}} 款可选</text>
   </view>
-  <view class="billing-note">首单起计 · {{hourlyServiceFee}}元/小时，不足一小时按一小时计</view>
+  <view class="billing-note">首单起计 · 时长费按在台游戏师人数动态计费（{{hourlyServiceFee}}元/人/小时）</view>
+  <view wx:if="{{isAdminOrder}}" class="billing-note">{{specialStaffHint}}</view>
 
   <view class="menu-list">
     <view wx:for="{{visibleProducts}}" wx:key="id" class="menu-item {{item.quantity > 0 ? 'menu-item-selected' : ''}}">
       <view class="item-info">
         <view class="item-name">{{item.name}}</view>
         <view class="item-price">{{item.priceText}}</view>
+        <view wx:if="{{item.isDesignated}}" class="secondary-text">{{item.specialCommissionText}}</view>
+        <picker wx:if="{{isAdminOrder && item.isDesignated && item.quantity > 0}}" range="{{specialStaffOptions}}" range-key="name" value="{{item.selectedStaffIndex >= 0 ? item.selectedStaffIndex : 0}}" data-id="{{item.id}}" bindchange="chooseSpecialStaff">
+          <view class="special-picker">{{item.selectedStaffId ? '提成归属：' + specialStaffOptions[item.selectedStaffIndex].name : '请选择此商品提成游戏师'}}</view>
+        </picker>
       </view>
       <view class="quantity-control">
         <button size="mini" class="quantity-button minus-button" disabled="{{item.quantity === 0 || submitting}}" data-id="{{item.id}}" bindtap="decrease" aria-label="减少{{item.name}}">−</button>

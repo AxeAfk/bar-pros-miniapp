@@ -26,8 +26,8 @@ const products = [
   { id: 'p016', categoryId: 'beer', name: '诱惑7号', price: 50, onSale: true },
   { id: 'p017', categoryId: 'beer', name: '诱惑9号', price: 50, onSale: true },
   { id: 'p018', categoryId: 'beer', name: '1664白啤', price: 50, onSale: true },
-  { id: 'p019', categoryId: 'wine', name: '香槟', price: 500, onSale: true },
-  { id: 'p020', categoryId: 'whisky', name: '轩尼诗VSOP', price: 2500, onSale: true },
+  { id: 'p019', categoryId: 'wine', name: '香槟', price: 500, onSale: true, commission: { scope: 'designated', rateBps: 3000 } },
+  { id: 'p020', categoryId: 'whisky', name: '轩尼诗VSOP', price: 2500, onSale: true, commission: { scope: 'designated', rateBps: 3000 } },
   { id: 'p021', categoryId: 'drink', name: '动力苏打酒', price: 20, onSale: true },
   { id: 'p022', categoryId: 'drink', name: '矿泉水', price: 10, onSale: true },
   { id: 'p023', categoryId: 'drink', name: '可乐', price: 10, onSale: true }

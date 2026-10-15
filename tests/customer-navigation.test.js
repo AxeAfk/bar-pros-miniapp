@@ -5,6 +5,12 @@ const path = require('node:path');
 const vm = require('node:vm');
 
 function loadPage(name, store = {}, app = {}) {
+  store = {
+    listEmployees: async () => [],
+    getAdminProfile: async () => ({ isAdmin: true, isOwner: false, ownerMaskedOpenid: '' }),
+    listAdminMembers: async () => [],
+    ...store
+  };
   let definition;
   const calls = [];
   const context = {
@@ -18,9 +24,9 @@ function loadPage(name, store = {}, app = {}) {
     wx: {
       redirectTo: (options) => calls.push({ type: 'redirect', ...options }),
       navigateTo: (options) => calls.push({ type: 'navigate', ...options }),
+      navigateBack: (options) => calls.push({ type: 'navigateBack', ...(options || {}) }),
       showToast: (options) => calls.push({ type: 'toast', ...options }),
       showModal: (options) => calls.push({ type: 'modal', ...options }),
-      requestSubscribeMessage: (options) => calls.push({ type: 'subscribe', options }),
       scanCode: (options) => calls.push({ type: 'scan', options })
     }
   };
@@ -81,6 +87,18 @@ test('administrators without a table go directly to the backend', async () => {
   assert.equal(calls[0].url, '/pages/admin/admin');
 });
 
+test('admin invite scan accepts membership and redirects to backend', async () => {
+  let accepted = '';
+  const { page, calls } = loadPage('entry', {
+    acceptAdminInvite: async (code) => { accepted = code; },
+    isAdmin: () => Promise.resolve(false)
+  }, { consumeEntryTableId: () => '' });
+  page.onLoad({ admin_invite: 'INV12345' });
+  await page.resolveEntry();
+  assert.equal(accepted, 'INV12345');
+  assert.equal(calls[1].url, '/pages/admin/admin');
+});
+
 test('scanner recognizes a mini-program path with an encoded scene', () => {
   const app = { globalData: {} };
   const { page, calls } = loadPage('entry', {
@@ -126,7 +144,9 @@ test('opening and dismissing a table bill never settles it', async () => {
   let settlements = 0;
   const { page } = loadPage('admin', {
     getTableDetail: async () => ({
-      id: 'S1', tableId: 'T01', itemTotal: 38, serviceFee: 99, totalAmount: 137, orders: []
+      id: 'S1', tableId: 'T01', tableName: '1号桌', itemTotal: 38, serviceFee: 99, totalAmount: 137,
+      currentStaff: [{ id: 'A', name: 'Alice' }], orders: [],
+      commission: { status: 'complete', amountCents: 2000, goodsAmountCents: 1000, goodsSharedAmountCents: 1000, specialAmountCents: 0, serviceAmountCents: 1000, allocations: [] }
     }),
     settleTable: async () => { settlements += 1; }
   });
@@ -171,7 +191,10 @@ test('received-payment confirmation sends the displayed bill and clears the corr
     }
   });
   page.refresh = async () => true;
-  page.data.checkoutBill = { id: 'S1', tableId: 'T01', totalAmount: 137 };
+  page.data.checkoutBill = {
+    id: 'S1', tableId: 'T01', totalAmount: 137,
+    commission: { status: 'complete', amountCents: 16980 }
+  };
   page.data.tables = [{ id: 'T01', status: 'using' }, { id: 'T02', status: 'using' }];
   const first = page.confirmPayment();
   await page.confirmPayment();
@@ -186,7 +209,10 @@ test('failed confirmation does not mark the table idle', async () => {
   const { page, calls } = loadPage('admin', {
     settleTable: async () => { throw new Error('Bill changed'); }
   });
-  page.data.checkoutBill = { id: 'S1', tableId: 'T01', totalAmount: 137 };
+  page.data.checkoutBill = {
+    id: 'S1', tableId: 'T01', totalAmount: 137,
+    commission: { status: 'complete', amountCents: 16980 }
+  };
   page.data.tables = [{ id: 'T01', status: 'using' }];
   await page.confirmPayment();
   assert.equal(page.data.tables[0].status, 'using');
@@ -194,16 +220,23 @@ test('failed confirmation does not mark the table idle', async () => {
   assert.equal(page.data.settling, false);
 });
 
-test('admin subscription is initiated by a tap and reports consent outcome', () => {
-  const { page, calls } = loadPage('admin');
-  page.subscribeOrders();
-  assert.equal(calls[0].type, 'subscribe');
-  const { options } = calls[0];
-  assert.equal(options.tmplIds.length, 1);
-  options.success({ [options.tmplIds[0]]: 'accept' });
-  assert.equal(calls[1].title, '已同意接单提醒');
-  options.success({ [options.tmplIds[0]]: 'reject' });
-  assert.equal(calls[2].title, '未开启接单提醒');
+test('admin has no subscription entry and still displays new-order toasts', async () => {
+  let orders = [];
+  const { page, calls } = loadPage('admin', {
+    getDashboard: async () => ({ stats: {}, tables: [], orders, settlements: [] })
+  });
+  const template = fs.readFileSync(path.join(__dirname, '..', 'pages', 'admin', 'admin.wxml'), 'utf8');
+  assert.equal(page.subscribeOrders, undefined);
+  assert.doesNotMatch(template, /subscribeOrders|订阅/);
+  assert.equal(await page.refresh(), true);
+  assert.equal(calls.length, 0);
+  orders = [{ id: 'O1', tableName: 'Table 1', totalAmount: 80 }];
+  assert.equal(await page.refresh(), true);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].type, 'toast');
+  assert.equal(calls[0].title, 'Table 1有新订单');
+  await page.refresh();
+  assert.equal(calls.length, 1);
 });
 
 test('menu accumulated spending excludes pending items and resets after clearing', () => {
@@ -211,7 +244,10 @@ test('menu accumulated spending excludes pending items and resets after clearing
   page.products = [{ id: 'P1', name: 'Drink', price: 38 }];
   page.cart = {};
   page._sessionStartedAt = Date.now() - 5000;
-  page._sessionItemTotal = 76;
+  page._sessionItemTotalCents = 7600;
+  page._serviceFeeBaseCents = 9900;
+  page._serviceFeeBaseAt = Date.now();
+  page._currentServiceRateCentsPerHour = 0;
   page.updateSessionClock();
   assert.equal(page.data.itemTotalText, '\u00a576.00');
   assert.equal(page.data.serviceFeeText, '\u00a599.00');
@@ -221,13 +257,14 @@ test('menu accumulated spending excludes pending items and resets after clearing
   assert.equal(page.data.cartTotalText, '\u00a538.00');
   assert.equal(page.data.sessionTotalText, '\u00a5175.00');
 
-  page._sessionStartedAt = Date.now() - 3605000;
+  page._serviceFeeBaseCents = 19800;
   page.updateSessionClock();
   assert.equal(page.data.serviceFeeText, '\u00a5198.00');
   assert.equal(page.data.sessionTotalText, '\u00a5274.00');
 
   page._sessionStartedAt = null;
-  page._sessionItemTotal = 0;
+  page._sessionItemTotalCents = 0;
+  page._serviceFeeBaseCents = 0;
   page.updateSessionClock();
   assert.equal(page.data.sessionTotalText, '\u00a50.00');
   assert.equal(page.data.sessionActive, false);
@@ -265,4 +302,140 @@ test('admin refresh formats persisted settlements and preserves the selected rec
   assert.equal(page.data.settlements[0].recordId, 'C1');
   assert.equal(page.data.settlements[0].totalText, '\u00a5137.00');
   assert.equal(page.data.settlements[0].serviceFeeText, '\u00a599.00');
+});
+
+test('checkout previews auto-computed commission and blocks incomplete commission states', async () => {
+  const settlements = [];
+  const { page, calls } = loadPage('admin', {
+    getTableDetail: async () => ({
+      id: 'S1', tableId: 'T01', tableName: '1号桌', itemTotal: 500, serviceFee: 99, totalAmount: 599,
+      currentStaff: [{ id: 'A', name: 'Alice' }, { id: 'B', name: 'Bob' }],
+      orders: [],
+      commission: {
+        status: 'pending_special_assignment',
+        goodsAmountCents: 15000,
+        goodsSharedAmountCents: 5000,
+        specialAmountCents: 10000,
+        serviceAmountCents: 1980,
+        amountCents: 16980,
+        allocations: [],
+        unassignedItems: [{ name: '香槟', amountCents: 10000 }]
+      }
+    }),
+    settleTable: async (...args) => { settlements.push(args); }
+  });
+  await page.checkout({ currentTarget: { dataset: { tableId: 'T01' } } });
+  assert.equal(page.data.checkoutBill.totalText, '\u00a5599.00');
+  assert.equal(page.data.checkoutBill.commissionView.amountText, '\u00a5169.80');
+  await page.confirmPayment();
+  assert.equal(settlements.length, 0);
+  assert.equal(page.data.showCommission, true);
+  assert.ok(calls.some((entry) => entry.type === 'toast'));
+});
+
+test('staffing sheet updates a table assignment and special admin orders require a designated owner', async () => {
+  const saved = [];
+  const { page, calls } = loadPage('admin', {
+    listEmployees: async () => [{ id: 'A', name: 'Alice', active: true }, { id: 'B', name: 'Bob', active: true }],
+    saveTableStaff: async (tableId, staffIds) => saved.push({ tableId, staffIds }),
+    getDashboard: async () => ({
+      stats: { orderCount: 0, revenue: 0 },
+      tables: [{ id: 'T01', name: '1号桌', status: 'idle', totalAmount: 0 }],
+      orders: [],
+      settlements: []
+    })
+  });
+  await page.refresh();
+  await page.openStaffing({ currentTarget: { dataset: { tableId: 'T01' } } });
+  page.toggleStaffOption({ currentTarget: { dataset: { id: 'A' } } });
+  await page.saveStaffing();
+  assert.equal(JSON.stringify(saved[0]), JSON.stringify({ tableId: 'T01', staffIds: ['A'] }));
+  assert.ok(calls.some((entry) => entry.title === '游戏师绑定已更新'));
+
+  const menu = loadPage('menu', {
+    getTableById: () => ({ id: 'T01', name: '1号桌' }),
+    getMenu: () => ({ products: [{ id: 'p019', name: '香槟', price: 500, commission: { scope: 'designated', rateBps: 3000 } }] }),
+    getCustomerSession: async () => null,
+    getTableDetail: async () => ({ currentStaff: [{ id: 'A', name: 'Alice' }, { id: 'B', name: 'Bob' }] }),
+    isAdmin: async () => true,
+    submitOrder: async () => ({ id: 'O1' })
+  });
+  menu.page.onLoad({ tableId: 'T01', source: 'admin' });
+  await Promise.resolve();
+  menu.page.increase({ currentTarget: { dataset: { id: 'p019' } } });
+  menu.page.submitOrder();
+  assert.equal(menu.calls[0].title, '香槟 需要先指定提成游戏师');
+});
+
+test('staff editor saves names and inactive state, reports failures without dismissing input', async () => {
+  const saved = [];
+  let fail = false;
+  const { page, calls } = loadPage('staff', {
+    saveEmployee: async (employee) => {
+      if (fail) throw new Error('Permission denied');
+      saved.push(employee);
+    },
+    listEmployees: async () => [{ id: 'A', name: 'Alice', active: true }]
+  });
+  page.newEmployee();
+  page.editName({ detail: { value: 'Alice' } });
+  await page.saveEmployee();
+  assert.equal(saved[0].name, 'Alice');
+  assert.equal(saved[0].active, true);
+  assert.equal(page.data.editor, null);
+  page.editEmployee({ currentTarget: { dataset: { id: 'A' } } });
+  page.editActive({ detail: { value: false } });
+  fail = true;
+  await page.saveEmployee();
+  assert.equal(page.data.editor.active, false);
+  assert.equal(page.data.saving, false);
+  assert.ok(calls.some((entry) => entry.title === 'Permission denied'));
+  fail = false;
+  await page.saveEmployee();
+  assert.equal(saved[1].id, 'A');
+  assert.equal(saved[1].active, false);
+});
+
+test('staff route is registered and all admin/staff template handlers exist', () => {
+  const config = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'app.json'), 'utf8'));
+  assert.ok(config.pages.includes('pages/staff/staff'));
+  for (const name of ['admin', 'staff']) {
+    const { page } = loadPage(name);
+    const template = fs.readFileSync(path.join(__dirname, '..', 'pages', name, `${name}.wxml`), 'utf8');
+    for (const match of template.matchAll(/(?:bind|catch)[a-z]+="(\w+)"/g)) {
+      assert.equal(typeof page[match[1]], 'function', `${name}: ${match[1]}`);
+    }
+    if (name === 'staff') {
+      assert.doesNotMatch(template, /提成发放记录|已线下发放/);
+      assert.match(template, /游戏师管理/);
+    }
+  }
+});
+
+test('staff page owners can generate invite QR and remove joined admin members', async () => {
+  const removed = [];
+  const { page, calls } = loadPage('staff', {
+    getAdminProfile: async () => ({ isAdmin: true, isOwner: true, ownerMaskedOpenid: 'owne…1234' }),
+    listAdminMembers: async () => [
+      { openid: 'owner', maskedOpenid: 'owne…1234', roleText: '唯一管理员', removable: false },
+      { openid: 'member1', maskedOpenid: 'memb…5678', roleText: '后台成员', removable: true, joinedAtText: '2026-10-16 03:00' }
+    ],
+    createAdminInvite: async () => ({
+      code: 'INV12345',
+      expiresAtText: '2026-10-16 03:30',
+      qrCodeUrl: 'https://example.invalid/invite.png'
+    }),
+    removeAdminMember: async (openid) => removed.push(openid),
+    listEmployees: async () => []
+  });
+  await page.onShow();
+  assert.equal(page.data.adminProfile.isOwner, true);
+  await page.createInvite();
+  assert.equal(page.data.invite.code, 'INV12345');
+  assert.ok(calls.some((entry) => entry.title === '邀请码已生成'));
+  const removing = page.removeAdminMember({ currentTarget: { dataset: { id: 'member1' } } });
+  calls.at(-1).success({ confirm: true });
+  await removing;
+  assert.equal(removed[0], 'member1');
+  assert.equal(page.data.records, undefined);
 });

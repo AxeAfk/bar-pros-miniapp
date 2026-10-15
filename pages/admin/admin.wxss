@@ -219,3 +219,29 @@
   flex: 1;
   font-size: 23rpx;
 }
+
+.commission-panel {
+  padding-top: 16rpx;
+}
+
+.allocation-card {
+  margin-top: 16rpx;
+  padding: 16rpx;
+  background: #101014;
+  border-radius: 16rpx;
+}
+
+.staff-option {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 16rpx;
+  padding: 20rpx;
+  background: #101014;
+  border: 1rpx solid rgba(255, 255, 255, 0.08);
+  border-radius: 16rpx;
+}
+
+.staff-option.selected {
+  border-color: #d6a354;
+  color: #f0c77a;
+}

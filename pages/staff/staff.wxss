@@ -1,0 +1,47 @@
+.actions {
+  display: flex;
+  gap: 12rpx;
+  margin-top: 24rpx;
+}
+
+.actions button[size="mini"] {
+  flex: 1;
+  margin: 0;
+}
+
+.record {
+  padding: 24rpx 0;
+  border-bottom: 1rpx solid rgba(255, 255, 255, 0.08);
+}
+
+.record.row > view {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: break-word;
+}
+
+.record button[size="mini"] {
+  margin: 16rpx 0 0;
+}
+
+.editor {
+  margin-top: 24rpx;
+  padding: 20rpx;
+  background: #101014;
+  border-radius: 16rpx;
+}
+
+.editor input {
+  height: 80rpx;
+  color: #f7f2ea;
+}
+
+.invite-qrcode {
+  width: 320rpx;
+  margin-top: 20rpx;
+  border-radius: 16rpx;
+}
+
+.allocation {
+  padding: 12rpx 0;
+}
