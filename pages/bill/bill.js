@@ -1,5 +1,7 @@
 const store = require('../../services/store');
 const { formatMoney, formatDuration } = require('../../utils/format');
+const { hourlyServiceFee } = require('../../config/app');
+const { calculateServiceFeeCents } = require('../../utils/commission');
 Page({
   data: {
     order: null,
@@ -47,6 +49,7 @@ Page({
       }
       return store.getCustomerSession(order.tableId, order.sessionId).then((session) => ({ order, session }));
     }).then(({ order, session }) => {
+      this._liveSession = session ? { ...session } : null;
       this._sessionStartedAt = session ? session.startedAt : null;
       this._sessionItemTotalCents = session ? (session.itemTotalCents || Math.round(session.itemTotal * 100)) : 0;
       this._serviceFeeBaseCents = session ? (session.serviceFeeCents || Math.round(session.serviceFee * 100)) : 0;
@@ -80,14 +83,19 @@ Page({
   },
 
   updateSessionClock() {
-    if (!this._sessionStartedAt) {
+    const now = Date.now();
+    const liveSession = this._liveSession;
+    const sessionStartedAt = liveSession ? liveSession.startedAt : this._sessionStartedAt;
+    if (!sessionStartedAt) {
       return;
     }
-    const elapsedMs = Math.max(0, Date.now() - this._sessionStartedAt);
-    const serviceFeeCents = this._serviceFeeBaseCents + Math.round(
-      Math.max(0, Date.now() - this._serviceFeeBaseAt) * this._currentServiceRateCentsPerHour / (60 * 60 * 1000)
-    );
-    const itemTotalCents = this._sessionItemTotalCents;
+    const elapsedMs = Math.max(0, now - sessionStartedAt);
+    const serviceFeeCents = liveSession
+      ? calculateServiceFeeCents(liveSession, now, hourlyServiceFee)
+      : this._serviceFeeBaseCents;
+    const itemTotalCents = liveSession
+      ? (liveSession.itemTotalCents || Math.round(liveSession.itemTotal * 100))
+      : this._sessionItemTotalCents;
     this.setData({
       session: {
         ...this.data.session,

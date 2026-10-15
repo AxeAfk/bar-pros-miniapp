@@ -29,6 +29,25 @@ function formatSummary(summary) {
   };
 }
 
+function buildStaffingState(staffing, selectedIds, extra = {}) {
+  const normalizedSelectedIds = Array.isArray(selectedIds) ? selectedIds : [];
+  const selectedSet = new Set(normalizedSelectedIds);
+  const employees = (staffing.employees || []).map((employee) => ({
+    ...employee,
+    selected: selectedSet.has(employee.id),
+    selectedText: selectedSet.has(employee.id) ? '已选' : '未选',
+    selectedHint: selectedSet.has(employee.id) ? '再次点击可取消绑定' : '点击选择绑定到当前桌台'
+  }));
+  return {
+    ...staffing,
+    ...extra,
+    selectedIds: normalizedSelectedIds,
+    selectedNames: employees.filter((employee) => employee.selected).map((employee) => employee.name),
+    selectedNamesText: employees.filter((employee) => employee.selected).map((employee) => employee.name).join('、'),
+    employees
+  };
+}
+
 Page({
   data: {
     stats: {
@@ -176,13 +195,12 @@ Page({
         ? summary.currentStaff.map((entry) => entry.id)
         : [];
       this.setData({
-        staffing: {
+        staffing: buildStaffingState({
           tableId,
           tableName: table.name,
-          selectedIds,
           employees: activeEmployees,
           saving: false
-        }
+        }, selectedIds)
       });
     } catch (error) {
       wx.showToast({ title: error.message || '游戏师列表读取失败', icon: 'none' });
@@ -201,7 +219,7 @@ Page({
     const selected = staffing.selectedIds.includes(employeeId)
       ? staffing.selectedIds.filter((id) => id !== employeeId)
       : [...staffing.selectedIds, employeeId];
-    this.setData({ staffing: { ...staffing, selectedIds: selected } });
+    this.setData({ staffing: buildStaffingState(staffing, selected) });
   },
 
   async saveStaffing() {
@@ -211,7 +229,7 @@ Page({
       wx.showToast({ title: '请至少绑定一位在台游戏师', icon: 'none' });
       return;
     }
-    this.setData({ staffing: { ...staffing, saving: true } });
+    this.setData({ staffing: buildStaffingState(staffing, staffing.selectedIds, { saving: true }) });
     try {
       await store.saveTableStaff(staffing.tableId, staffing.selectedIds);
       wx.showToast({ title: '游戏师绑定已更新' });
@@ -219,7 +237,7 @@ Page({
       await this.refresh();
     } catch (error) {
       wx.showToast({ title: error.message || '游戏师绑定失败', icon: 'none' });
-      this.setData({ staffing: { ...staffing, saving: false } });
+      this.setData({ staffing: buildStaffingState(staffing, staffing.selectedIds, { saving: false }) });
     }
   },
 

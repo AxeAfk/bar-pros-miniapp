@@ -16,6 +16,10 @@ function commissionView(commission) {
   } else if (commission.status === 'pending_special_assignment') {
     warning = '存在未指定归属的特殊商品，请先由管理员指定提成游戏师。';
   }
+  const allocationNames = Object.fromEntries((commission && commission.allocations || []).map((entry) => [
+    entry.employeeId,
+    entry.employeeName || entry.employeeId
+  ]));
   return {
     amountText: calculated ? formatMoney(commission.amountCents / 100) : '未核算',
     goodsText: calculated ? formatMoney((commission.goodsAmountCents || 0) / 100) : '未核算',
@@ -32,7 +36,20 @@ function commissionView(commission) {
         amountText: formatMoney(entry.amountCents / 100),
         serviceAmountText: formatMoney(entry.serviceAmountCents / 100),
         goodsSharedAmountText: formatMoney(entry.goodsSharedAmountCents / 100),
-        specialAmountText: formatMoney(entry.specialAmountCents / 100)
+        specialAmountText: formatMoney(entry.specialAmountCents / 100),
+        specialItems: (entry.specialItems || []).map((item) => ({
+          ...item,
+          rateText: `${item.rateBps / 100}%`,
+          amountText: formatMoney(item.amountCents / 100)
+        }))
+      }))
+      : [],
+    specialItems: commission && commission.specialItems
+      ? commission.specialItems.map((item) => ({
+        ...item,
+        employeeName: allocationNames[item.designatedStaffId] || item.designatedStaffId || '',
+        rateText: `${item.rateBps / 100}%`,
+        amountText: formatMoney(item.amountCents / 100)
       }))
       : [],
     unassignedItems: commission && commission.unassignedItems

@@ -87,13 +87,93 @@ function createSessionRecord(table, startedAt, staffIds = []) {
   };
 }
 
+async function listCollectionDocuments(collectionName, limit = 100) {
+  const collection = db.collection(collectionName);
+  const documents = [];
+  let offset = 0;
+  let page = [];
+  do {
+    const result = await collection.skip(offset).limit(limit).get();
+    page = Array.isArray(result.data) ? result.data : [];
+    documents.push(...page);
+    offset += page.length;
+  } while (page.length === limit);
+  return documents;
+}
+
+function isMissingCollectionError(error) {
+  const message = [
+    error && error.message,
+    error && error.errMsg,
+    error && error.code,
+    error && error.errCode
+  ].filter(Boolean).join(' ');
+  return /collection/i.test(message) &&
+    /(does not exist|doesn't exist|not exist|not exists|不存在|non[- ]?existent|not found)/i.test(message);
+}
+
+function isMissingDocumentError(error) {
+  const message = [
+    error && error.message,
+    error && error.errMsg,
+    error && error.code,
+    error && error.errCode
+  ].filter(Boolean).join(' ');
+  return /(document|get).*_id/i.test(message) &&
+    /(does not exist|doesn't exist|not exist|not exists|不存在|non[- ]?existent|not found)/i.test(message);
+}
+
+function errorMessage(error) {
+  if (!error) return '云端请求失败';
+  return String(error.message || error.errMsg || error.code || error.errCode || '云端请求失败');
+}
+
+function collectionFromError(error) {
+  const message = errorMessage(error);
+  const match = message.match(/bar_[a-z_]+/i);
+  return match ? match[0] : '';
+}
+
+function explainCloudError(error) {
+  if (isMissingCollectionError(error)) {
+    const collection = collectionFromError(error);
+    if (collection) {
+      return `请先在云开发数据库中创建 ${collection} 集合`;
+    }
+    return '请先在云开发数据库中创建缺失的集合';
+  }
+  return errorMessage(error);
+}
+
+async function listOptionalCollectionDocuments(collectionName, limit = 100) {
+  try {
+    return await listCollectionDocuments(collectionName, limit);
+  } catch (error) {
+    if (isMissingCollectionError(error)) {
+      return [];
+    }
+    throw error;
+  }
+}
+
+async function getOptionalDocument(collectionName, documentId, transaction) {
+  try {
+    const result = await (transaction || db).collection(collectionName).doc(documentId).get();
+    return result.data || null;
+  } catch (error) {
+    if (isMissingCollectionError(error) || isMissingDocumentError(error)) {
+      return null;
+    }
+    throw error;
+  }
+}
+
 async function getEmployeesByIds(employeeIds, transaction) {
   const ids = commissionRules.normalizeStaffIds(employeeIds);
-  const collection = (transaction || db).collection('bar_employees');
   const employees = [];
   for (const employeeId of ids) {
-    const result = await collection.doc(employeeId).get();
-    if (result.data) employees.push(result.data);
+    const employee = await getOptionalDocument('bar_employees', employeeId, transaction);
+    if (employee) employees.push(employee);
   }
   return Object.fromEntries(employees.map((employee) => [employee.id, employee]));
 }
@@ -148,8 +228,8 @@ function isOwner(openid) {
 
 async function getAdminMember(openid) {
   if (!openid) return null;
-  const result = await db.collection('bar_admin_members').doc(openid).get();
-  return result.data && result.data.status !== 'removed' ? result.data : null;
+  const member = await getOptionalDocument('bar_admin_members', openid);
+  return member && member.status !== 'removed' ? member : null;
 }
 
 async function isAdmin(openid) {
@@ -177,6 +257,37 @@ function maskOpenid(openid) {
 function randomInviteCode(length = 8) {
   const alphabet = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
   return Array.from(crypto.randomBytes(length), (byte) => alphabet[byte % alphabet.length]).join('');
+}
+
+function imageDataUrl(buffer, mimeType = 'image/png') {
+  return `data:${mimeType};base64,${Buffer.from(buffer).toString('base64')}`;
+}
+
+async function getUnlimitedCodeWithFallback({ page, scene, width }) {
+  const attempts = [
+    { envVersion: 'release', checkPath: true },
+    { envVersion: 'trial', checkPath: false },
+    { envVersion: 'develop', checkPath: false }
+  ];
+  const failures = [];
+  for (const attempt of attempts) {
+    try {
+      const qr = await cloud.openapi.wxacode.getUnlimited({
+        page,
+        scene,
+        envVersion: attempt.envVersion,
+        checkPath: attempt.checkPath,
+        width
+      });
+      if (!qr || (qr.errCode && qr.errCode !== 0) || !qr.buffer || typeof qr.buffer.length !== 'number' || !qr.buffer.length) {
+        throw new Error(qr && qr.errMsg ? qr.errMsg : '未返回图片');
+      }
+      return { qr, envVersion: attempt.envVersion, checkPath: attempt.checkPath };
+    } catch (error) {
+      failures.push(`${attempt.envVersion}: ${errorMessage(error)}`);
+    }
+  }
+  throw new Error(`邀请码二维码生成失败：${failures.join('；')}`);
 }
 
 async function ensureTables() {
@@ -551,17 +662,9 @@ async function getAdminProfile(openid) {
 
 async function listAdminMembers(openid) {
   await assertAdmin(openid);
-  const members = [];
-  let page = [];
-  do {
-    const result = await db.collection('bar_admin_members')
-      .orderBy('joinedAt', 'asc')
-      .skip(members.length)
-      .limit(100)
-      .get();
-    page = result.data.filter((entry) => entry.status !== 'removed');
-    members.push(...page);
-  } while (page.length === 100);
+  const members = (await listOptionalCollectionDocuments('bar_admin_members'))
+    .filter((entry) => entry && entry.status !== 'removed')
+    .sort((first, second) => Number(first.joinedAt || 0) - Number(second.joinedAt || 0));
 
   return [
     {
@@ -590,7 +693,6 @@ async function createAdminInvite(openid) {
   const code = randomInviteCode();
   const createdAt = Date.now();
   const expiresAt = createdAt + adminInviteTtlMs;
-  const envVersion = 'release';
   const invite = {
     code,
     status: 'pending',
@@ -603,17 +705,15 @@ async function createAdminInvite(openid) {
   };
   await db.collection('bar_admin_invites').doc(code).set({ data: invite });
 
+  const { qr, envVersion } = await getUnlimitedCodeWithFallback({
+    page: 'pages/entry/entry',
+    scene: `admin_invite=${code}`,
+    width: 430
+  });
+  invite.qrCodeEnvVersion = envVersion;
+  invite.qrCodeDataUrl = imageDataUrl(qr.buffer);
+
   try {
-    const qr = await cloud.openapi.wxacode.getUnlimited({
-      page: 'pages/entry/entry',
-      scene: `admin_invite=${code}`,
-      envVersion,
-      checkPath: true,
-      width: 430
-    });
-    if (!qr || (qr.errCode && qr.errCode !== 0) || !qr.buffer || typeof qr.buffer.length !== 'number' || !qr.buffer.length) {
-      throw new Error(`WeChat code generation failed: ${qr && qr.errMsg ? qr.errMsg : 'no image returned'}`);
-    }
     const uploaded = await cloud.uploadFile({
       cloudPath: `qrcode/admin-invites/${envVersion}/${code}.png`,
       fileContent: qr.buffer
@@ -632,6 +732,9 @@ async function createAdminInvite(openid) {
   } catch (error) {
     console.error('Admin invite QR generation failed', { openid, code, error });
     invite.qrCodeUrl = '';
+  }
+  if (!invite.qrCodeUrl && !invite.qrCodeDataUrl) {
+    throw new Error('邀请码二维码生成失败，请稍后重试');
   }
   return invite;
 }
@@ -695,15 +798,12 @@ async function removeAdminMember(targetOpenid, openid) {
 
 async function listEmployees(openid) {
   await assertAdmin(openid);
-  const employees = [];
-  let page;
-  do {
-    const result = await db.collection('bar_employees').orderBy('createdAt', 'asc')
-      .skip(employees.length).limit(100).get();
-    page = result.data;
-    employees.push(...page);
-  } while (page.length === 100);
-  return employees;
+  return (await listOptionalCollectionDocuments('bar_employees'))
+    .sort((first, second) => {
+      const createdAtDelta = Number(first.createdAt || 0) - Number(second.createdAt || 0);
+      if (createdAtDelta) return createdAtDelta;
+      return String(first.id || '').localeCompare(String(second.id || ''));
+    });
 }
 
 async function saveEmployee(input, openid) {
@@ -763,67 +863,74 @@ async function markCommissionPaid(settlementId, openid) {
 }
 
 exports.main = async (event) => {
-  const context = cloud.getWXContext();
-  let data;
-  switch (event.action) {
-    case 'listTables':
-      data = await listTables();
-      break;
-    case 'getCustomerSession':
-      data = await getCustomerSession(event.tableId, event.sessionId);
-      break;
-    case 'isAdmin':
-      data = await isAdmin(context.OPENID);
-      break;
-    case 'getAdminProfile':
-      data = await getAdminProfile(context.OPENID);
-      break;
-    case 'listAdminMembers':
-      data = await listAdminMembers(context.OPENID);
-      break;
-    case 'createAdminInvite':
-      data = await createAdminInvite(context.OPENID);
-      break;
-    case 'acceptAdminInvite':
-      data = await acceptAdminInvite(event.code, context.OPENID);
-      break;
-    case 'removeAdminMember':
-      data = await removeAdminMember(event.openid, context.OPENID);
-      break;
-    case 'getOrder':
-      data = await getOrder(event.orderId, context.OPENID);
-      break;
-    case 'submitOrder':
-      data = await submitOrder(event, context);
-      await require('./order-notifications').notifyWecomRobot(data, process.env.WECOM_WEBHOOK_URL);
-      data = publicOrder(data);
-      break;
-    case 'getDashboard':
-      data = await getDashboard(context.OPENID);
-      break;
-    case 'getTableDetail':
-      data = await getTableDetail(event.tableId, context.OPENID);
-      break;
-    case 'updateTableStaff':
-      data = await updateTableStaff(event.tableId, event.staffIds, context.OPENID);
-      break;
-    case 'settleTable':
-      data = await settleTable(event.tableId, context.OPENID, event.expected);
-      break;
-    case 'listEmployees':
-      data = await listEmployees(context.OPENID);
-      break;
-    case 'saveEmployee':
-      data = await saveEmployee(event.employee, context.OPENID);
-      break;
-    case 'listCommissionSettlements':
-      data = await listCommissionSettlements(event, context.OPENID);
-      break;
-    case 'markCommissionPaid':
-      data = await markCommissionPaid(event.settlementId, context.OPENID);
-      break;
-    default:
-      throw new Error('未知的云端操作');
+  try {
+    const context = cloud.getWXContext();
+    let data;
+    switch (event.action) {
+      case 'listTables':
+        data = await listTables();
+        break;
+      case 'getCustomerSession':
+        data = await getCustomerSession(event.tableId, event.sessionId);
+        break;
+      case 'isAdmin':
+        data = await isAdmin(context.OPENID);
+        break;
+      case 'getAdminProfile':
+        data = await getAdminProfile(context.OPENID);
+        break;
+      case 'listAdminMembers':
+        data = await listAdminMembers(context.OPENID);
+        break;
+      case 'createAdminInvite':
+        data = await createAdminInvite(context.OPENID);
+        break;
+      case 'acceptAdminInvite':
+        data = await acceptAdminInvite(event.code, context.OPENID);
+        break;
+      case 'removeAdminMember':
+        data = await removeAdminMember(event.openid, context.OPENID);
+        break;
+      case 'getOrder':
+        data = await getOrder(event.orderId, context.OPENID);
+        break;
+      case 'submitOrder':
+        data = await submitOrder(event, context);
+        await require('./order-notifications').notifyWecomRobot(data, process.env.WECOM_WEBHOOK_URL);
+        data = publicOrder(data);
+        break;
+      case 'getDashboard':
+        data = await getDashboard(context.OPENID);
+        break;
+      case 'getTableDetail':
+        data = await getTableDetail(event.tableId, context.OPENID);
+        break;
+      case 'updateTableStaff':
+        data = await updateTableStaff(event.tableId, event.staffIds, context.OPENID);
+        break;
+      case 'settleTable':
+        data = await settleTable(event.tableId, context.OPENID, event.expected);
+        break;
+      case 'listEmployees':
+        data = await listEmployees(context.OPENID);
+        break;
+      case 'saveEmployee':
+        data = await saveEmployee(event.employee, context.OPENID);
+        break;
+      case 'listCommissionSettlements':
+        data = await listCommissionSettlements(event, context.OPENID);
+        break;
+      case 'markCommissionPaid':
+        data = await markCommissionPaid(event.settlementId, context.OPENID);
+        break;
+      default:
+        throw new Error('未知的云端操作');
+    }
+    return { success: true, data };
+  } catch (error) {
+    if (typeof console !== 'undefined' && console && typeof console.error === 'function') {
+      console.error('barApi failed', { action: event && event.action, error });
+    }
+    return { success: false, error: explainCloudError(error) };
   }
-  return { success: true, data };
 };

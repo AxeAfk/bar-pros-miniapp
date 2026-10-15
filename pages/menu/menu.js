@@ -2,6 +2,7 @@ const store = require('../../services/store');
 const { formatMoney, formatDuration } = require('../../utils/format');
 const { normalizeTableId } = require('../../utils/entry');
 const { hourlyServiceFee } = require('../../config/app');
+const { calculateServiceFeeCents } = require('../../utils/commission');
 
 function isDesignatedProduct(product) {
   const commission = product && product.commission;
@@ -136,6 +137,7 @@ Page({
     this.sessionRequestPending = true;
     store.getCustomerSession(this.data.tableId).then((summary) => {
       this._sessionErrorShown = false;
+      this._liveSession = summary ? { ...summary } : null;
       this._sessionStartedAt = summary ? summary.startedAt : null;
       this._sessionItemTotalCents = summary ? (summary.itemTotalCents || Math.round(summary.itemTotal * 100)) : 0;
       this._serviceFeeBaseCents = summary ? (summary.serviceFeeCents || Math.round(summary.serviceFee * 100)) : 0;
@@ -153,18 +155,21 @@ Page({
   },
 
   updateSessionClock() {
-    const elapsedMs = this._sessionStartedAt ? Math.max(0, Date.now() - this._sessionStartedAt) : 0;
-    const serviceFeeCents = this._sessionStartedAt
-      ? this._serviceFeeBaseCents + Math.round(
-        Math.max(0, Date.now() - this._serviceFeeBaseAt) * this._currentServiceRateCentsPerHour / (60 * 60 * 1000)
-      )
-      : 0;
-    const itemTotalCents = this._sessionStartedAt ? this._sessionItemTotalCents : 0;
-    const elapsedText = this._sessionStartedAt ? formatDuration(elapsedMs) : '00:00:00';
+    const now = Date.now();
+    const liveSession = this._liveSession;
+    const sessionStartedAt = liveSession ? liveSession.startedAt : this._sessionStartedAt;
+    const elapsedMs = sessionStartedAt ? Math.max(0, now - sessionStartedAt) : 0;
+    const serviceFeeCents = liveSession
+      ? calculateServiceFeeCents(liveSession, now, hourlyServiceFee)
+      : (sessionStartedAt ? this._serviceFeeBaseCents : 0);
+    const itemTotalCents = liveSession
+      ? (liveSession.itemTotalCents || Math.round(liveSession.itemTotal * 100))
+      : (sessionStartedAt ? this._sessionItemTotalCents : 0);
+    const elapsedText = sessionStartedAt ? formatDuration(elapsedMs) : '00:00:00';
     this.setData({
-      sessionActive: Boolean(this._sessionStartedAt),
+      sessionActive: Boolean(sessionStartedAt),
       elapsedText,
-      timerHint: this._sessionStartedAt ? `已消费 ${elapsedText}` : '首单提交后开始计时',
+      timerHint: sessionStartedAt ? `已消费 ${elapsedText}` : '首单提交后开始计时',
       itemTotalText: formatMoney(itemTotalCents / 100),
       serviceFeeText: formatMoney(serviceFeeCents / 100),
       sessionTotalText: formatMoney((itemTotalCents + serviceFeeCents) / 100)

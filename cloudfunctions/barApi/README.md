@@ -10,14 +10,16 @@ The mini program uses this cloud function for persistent tables, orders, active 
 - `bar_admin_members`
 - `bar_admin_invites`
 
+If `bar_employees` or `bar_admin_members` have not been created yet, the staff
+page now treats them as empty on read. Creating those collections is still
+required before saving employees or accepting backend-member invites.
+
 Set each collection's client read and write permissions to deny access. The mini program accesses records through `barApi`; its admin operations are checked server-side.
 
 Create database indexes for the queried fields: `bar_sessions.tableId`, `bar_tables.id`, `bar_orders.createdAt`, `bar_orders.sessionId + createdAt`, and `bar_settlements.closedAt`.
-For employee/commission management, also create `bar_employees.createdAt` (ascending),
+For employee/commission management, also create
 `bar_settlements.closedAt + id` (both descending), and
 `bar_settlements.commission.payoutStatus` (ascending) + `closedAt + id` (descending).
-For backend membership, also create `bar_admin_members.joinedAt` (ascending) and
-`bar_admin_invites.createdAt` (descending).
 
 Before launch:
 
@@ -109,12 +111,16 @@ settled commissions.
 
 ### Dynamic timing and commission model
 
-- Service fee is no longer rounded up by whole hours. It is calculated from
-  staff timeline segments: `99 元/小时 × 当段在台游戏师数 × 实际时长`.
+- Service fee uses independent hourly clocks per game master. Once a game
+  master starts serving, that game master is charged `99 元` for the first
+  started hour, another `99 元` after crossing 1 hour, and so on.
 - Opening a table or adjusting staff closes the previous segment at the current
   timestamp and starts a new one with the updated staff list.
-- Service-fee commission is 20% of each segment's service fee, split evenly
-  across the employees in that segment.
+- If a game master stays on duty across consecutive segments, that game
+  master's hourly clock continues instead of resetting. A clock restarts only
+  after the game master leaves the table and later rejoins.
+- Service-fee commission is 20% of each game master's own accumulated service
+  fee.
 - Ordinary goods commission is 20% and is split evenly across all employees who
   participated in any segment of that table session.
 - Designated goods commission is 100% assigned to the chosen employee on that
@@ -132,12 +138,23 @@ employee.
   one-time invite QR code; the invited WeChat user scans it and is inserted into
   `bar_admin_members`. The owner can later remove any invited member, but cannot
   remove the owner account itself.
+- Invite generation now returns a directly displayable QR image. If the cloud
+  file temporary URL cannot be produced, the function falls back to inline image
+  data so the owner can still screenshot or save the QR code from the mini
+  program.
+- Invite QR generation first tries `release` with path checking, then
+  automatically falls back to `trial` and `develop` if the current release code
+  cannot be generated in the active environment.
+- The staff page reads `bar_admin_members` and `bar_employees` without custom
+  sorting indexes, so it can open even before those optional indexes are added.
 - Open **游戏师管理** from the admin page. Add/edit/disable game masters; they do
   not need a WeChat login. There is no destructive delete operation.
 - From the dashboard, use **开台绑定游戏师** or **调整游戏师**. Saving a change writes
   a new timestamped staff segment immediately.
 - At checkout, expand **游戏师提成预览（内部）**. The system shows the split by
   game master automatically: service fee, shared goods, and designated goods.
+  Designated goods lines such as Champagne and Hennessy VSOP are listed with the
+  concrete product name, quantity, rate, and commission amount.
 - Confirm received payment to persist the settlement and computed allocations
   together and clear the table atomically. Game master names are snapshotted so
   subsequent edits or deactivation do not change history.

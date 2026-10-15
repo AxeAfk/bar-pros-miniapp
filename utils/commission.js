@@ -142,6 +142,13 @@ function readOrderItemCommission(item) {
   };
 }
 
+function chargeableHours(elapsedMs) {
+  if (!Number.isFinite(elapsedMs) || elapsedMs < 0) {
+    throw new Error('时长数据无效');
+  }
+  return Math.max(1, Math.ceil(elapsedMs / hourMs));
+}
+
 function serviceSegments(session, now, hourlyServiceFee) {
   const source = Array.isArray(session.staffSegments) && session.staffSegments.length
     ? session.staffSegments
@@ -152,48 +159,100 @@ function serviceSegments(session, now, hourlyServiceFee) {
       endAtText: '',
       staffIds: Array.isArray(session.currentStaffIds) ? session.currentStaffIds : []
     }];
-  let currentStaffCount = 0;
-  let currentServiceRateCentsPerHour = 0;
-  let serviceFeeCents = 0;
-  const participants = [];
-  const seen = new Set();
-  const segments = source.map((segment) => {
+  const normalizedSegments = source.map((segment, index) => {
     const staffIds = normalizeStaffIds(Array.isArray(segment.staffIds) ? segment.staffIds : []);
     const startAt = Number(segment.startAt) || session.startedAt || now;
     const endAt = segment.endAt === null || segment.endAt === undefined ? now : Number(segment.endAt);
-    const elapsedMs = Math.max(0, endAt - startAt);
-    const staffCount = staffIds.length;
-    const feeCents = Math.round(elapsedMs * hourlyServiceFee * 100 * staffCount / hourMs);
-    serviceFeeCents += feeCents;
-    if (segment.endAt === null || segment.endAt === undefined) {
-      currentStaffCount = staffCount;
-      currentServiceRateCentsPerHour = hourlyServiceFee * 100 * staffCount;
+    return {
+      index,
+      startAt,
+      startAtText: segment.startAtText || '',
+      endAt,
+      endAtText: segment.endAtText || '',
+      isOpen: segment.endAt === null || segment.endAt === undefined,
+      elapsedMs: Math.max(0, endAt - startAt),
+      staffIds,
+      staffCount: staffIds.length
+    };
+  }).sort((first, second) => first.startAt - second.startAt || first.index - second.index);
+  let currentStaffCount = 0;
+  let currentServiceRateCentsPerHour = 0;
+  const participants = [];
+  const seen = new Set();
+  normalizedSegments.forEach((segment) => {
+    if (segment.isOpen) {
+      currentStaffCount = segment.staffCount;
+      currentServiceRateCentsPerHour = hourlyServiceFee * 100 * segment.staffCount;
     }
-    staffIds.forEach((employeeId) => {
+    segment.staffIds.forEach((employeeId) => {
       if (!seen.has(employeeId)) {
         seen.add(employeeId);
         participants.push(employeeId);
       }
     });
+  });
+
+  const openPeriods = new Map();
+  const staffPeriods = [];
+  normalizedSegments.forEach((segment) => {
+    const activeStaff = new Set(segment.staffIds);
+    Array.from(openPeriods.keys()).forEach((employeeId) => {
+      if (!activeStaff.has(employeeId)) {
+        openPeriods.delete(employeeId);
+      }
+    });
+    segment.staffIds.forEach((employeeId) => {
+      const existing = openPeriods.get(employeeId);
+      if (existing && existing.endAt === segment.startAt) {
+        existing.endAt = segment.endAt;
+        existing.endAtText = segment.endAtText;
+        return;
+      }
+      const next = {
+        employeeId,
+        startAt: segment.startAt,
+        startAtText: segment.startAtText,
+        endAt: segment.endAt,
+        endAtText: segment.endAtText
+      };
+      staffPeriods.push(next);
+      openPeriods.set(employeeId, next);
+    });
+  });
+  const servicePeriods = staffPeriods.map((period) => {
+    const elapsedMs = Math.max(0, period.endAt - period.startAt);
+    const billedHours = chargeableHours(elapsedMs);
+    const feeCents = billedHours * hourlyServiceFee * 100;
     return {
-      startAt,
-      startAtText: segment.startAtText || '',
-      endAt: segment.endAt === null || segment.endAt === undefined ? null : endAt,
-      endAtText: segment.endAtText || '',
+      ...period,
       elapsedMs,
-      staffIds,
-      staffCount,
+      billedHours,
       serviceFeeCents: feeCents,
       serviceFee: feeCents / 100
     };
   });
+  const serviceFeeCents = sumCents(servicePeriods.map((period) => period.serviceFeeCents));
+  const segments = normalizedSegments.map((segment) => ({
+    startAt: segment.startAt,
+    startAtText: segment.startAtText,
+    endAt: segment.isOpen ? null : segment.endAt,
+    endAtText: segment.endAtText,
+    elapsedMs: segment.elapsedMs,
+    staffIds: segment.staffIds,
+    staffCount: segment.staffCount
+  }));
   return {
     segments,
+    servicePeriods,
     participantStaffIds: participants,
     currentStaffCount,
     currentServiceRateCentsPerHour,
     serviceFeeCents
   };
+}
+
+function calculateServiceFeeCents(session, now, hourlyServiceFee) {
+  return serviceSegments(session, now, hourlyServiceFee).serviceFeeCents;
 }
 
 function summarizeCommission(session, orders, details, employeesById = {}) {
@@ -203,16 +262,17 @@ function summarizeCommission(session, orders, details, employeesById = {}) {
   const unassignedItems = [];
   let goodsSharedAmountCents = 0;
   let specialAmountCents = 0;
-  const serviceBreakdown = details.segments.map((segment) => {
-    const amountCents = calculate(segment.serviceFeeCents, defaultRateBps);
-    const allocations = segment.staffIds.length
-      ? distributeEvenly(amountCents, segment.staffIds, employeesById, allocationMap, 'serviceAmountCents')
-      : [];
+  const serviceBreakdown = details.servicePeriods.map((period) => {
+    const amountCents = calculate(period.serviceFeeCents, defaultRateBps);
+    const record = ensureAllocation(allocationMap, null, period.employeeId,
+      employeesById[period.employeeId] && employeesById[period.employeeId].name);
+    record.serviceAmountCents += amountCents;
+    record.amountCents += amountCents;
     return {
-      ...segment,
+      ...period,
       commissionRateBps: defaultRateBps,
       amountCents,
-      allocations
+      allocations: [{ employeeId: period.employeeId, amountCents }]
     };
   });
 
@@ -339,6 +399,7 @@ module.exports = {
   normalizeProductCommission,
   itemCommission,
   orderCommission,
+  calculateServiceFeeCents,
   summarizeSession,
   summarizeCommission,
   settleCommission,

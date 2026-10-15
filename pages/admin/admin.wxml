@@ -2,7 +2,7 @@
   <view class="section">
     <view class="title">管理员后台</view>
     <view class="subtitle">云端桌台台账 · 动态计时 · 特殊商品定向提成</view>
-    <button class="secondary-button" bindtap="openStaff">游戏师管理</button>
+    <button class="secondary-button empty" bindtap="openStaff">游戏师管理</button>
   </view>
 
   <view class="stats">
@@ -34,7 +34,7 @@
         <view wx:else class="subtitle">点击查看 / 管理</view>
         <view class="table-actions">
           <button size="mini" class="secondary-button small-btn" data-table-id="{{item.id}}" catchtap="openStaffing">{{item.status === 'using' ? '调整游戏师' : '开台绑定游戏师'}}</button>
-          <button size="mini" class="secondary-button small-btn" data-table-id="{{item.id}}" catchtap="addOrder">为此桌点单</button>
+          <button size="mini" class="secondary-button small-btn buy-button" data-table-id="{{item.id}}" catchtap="addOrder">为此桌点单</button>
           <button wx:if="{{item.status === 'using'}}" size="mini" class="primary-button small-btn buy-button" disabled="{{checkoutLoading || settling}}" data-table-id="{{item.id}}" catchtap="checkout">买单</button>
         </view>
       </view>
@@ -62,7 +62,7 @@
       <view wx:for="{{item.items}}" wx:for-item="product" wx:key="productId" class="product-line">
         <view>
           <text>{{product.name}} × {{product.quantity}}（{{product.unitPriceText}} / 件）</text>
-          <view class="subtitle">{{product.commissionText}}</view>
+          <view class="subtitle {{product.commission && product.commission.scope === 'designated' ? 'special-item-commission' : ''}}">{{product.commissionText}}</view>
         </view>
         <text>{{product.lineTotalText}}</text>
       </view>
@@ -91,7 +91,7 @@
           <view wx:for="{{item.items}}" wx:for-item="product" wx:key="productId" class="product-line">
             <view>
               <text>{{product.name}} × {{product.quantity}}（{{product.unitPriceText}}）</text>
-              <view class="subtitle">{{product.commissionText}}</view>
+              <view class="subtitle {{product.commission && product.commission.scope === 'designated' ? 'special-item-commission' : ''}}">{{product.commissionText}}</view>
             </view>
             <text>{{product.lineTotalText}}</text>
           </view>
@@ -106,6 +106,15 @@
           <view wx:for="{{checkoutBill.commissionView.allocations}}" wx:key="employeeId" class="allocation-card">
             <view class="row"><text>{{item.employeeName}}</text><text>{{item.amountText}}</text></view>
             <view class="subtitle">时长 {{item.serviceAmountText}} · 普通商品 {{item.goodsSharedAmountText}} · 特殊商品 {{item.specialAmountText}}</view>
+            <view wx:for="{{item.specialItems}}" wx:for-item="special" wx:key="productId" class="subtitle special-commission-line">
+              特殊商品：{{special.name}} × {{special.quantity}} · {{special.rateText}} · {{special.amountText}}
+            </view>
+          </view>
+          <view wx:if="{{checkoutBill.commissionView.specialItems.length}}" class="subtitle special-commission-summary">
+            特殊商品归属明细：
+          </view>
+          <view wx:for="{{checkoutBill.commissionView.specialItems}}" wx:for-item="special" wx:key="productId" class="subtitle special-commission-line special-commission-highlight">
+            {{special.employeeName || '待指定'}}：{{special.name}} × {{special.quantity}} · {{special.rateText}} · {{special.amountText}}
           </view>
           <view wx:if="{{checkoutBill.commissionView.unassignedItems.length}}" class="subtitle danger">未指定特殊商品：{{checkoutBill.commissionView.unassignedItems.length}} 条</view>
         </view>
@@ -122,15 +131,21 @@
   <view wx:if="{{staffing}}" class="checkout-overlay" catchtouchmove="closeNothing">
     <view class="checkout-sheet">
       <view class="checkout-title">{{staffing.tableName}} · 绑定在台游戏师</view>
-      <view class="subtitle">保存后会按当前时间切换新的计时分段。</view>
+      <view class="subtitle">保存后会按当前时间切换新的计时分段；已选项再次点击即可取消。</view>
       <scroll-view scroll-y class="checkout-content">
         <view wx:if="{{!staffing.employees.length}}" class="subtitle danger">暂无在职游戏师，请先到游戏师管理里添加。</view>
-        <view wx:for="{{staffing.employees}}" wx:key="id" class="staff-option {{staffing.selectedIds.indexOf(item.id) >= 0 ? 'selected' : ''}}" data-id="{{item.id}}" bindtap="toggleStaffOption">
-          <text>{{item.name}}</text>
-          <text>{{staffing.selectedIds.indexOf(item.id) >= 0 ? '已选' : '点击选择'}}</text>
+        <view wx:for="{{staffing.employees}}" wx:key="id" class="staff-option {{item.selected ? 'selected' : ''}}" data-id="{{item.id}}" bindtap="toggleStaffOption">
+          <view>
+            <view class="staff-option-name">{{item.name}}</view>
+            <view class="subtitle">{{item.selectedHint}}</view>
+          </view>
+          <view class="staff-option-status {{item.selected ? 'selected' : ''}}">
+            {{item.selectedText}}
+          </view>
         </view>
       </scroll-view>
       <view class="subtitle">已选 {{staffing.selectedIds.length}} 人</view>
+      <view wx:if="{{staffing.selectedNames.length}}" class="subtitle">当前已选：{{staffing.selectedNamesText}}</view>
       <view class="checkout-actions">
         <button size="mini" class="secondary-button" disabled="{{staffing.saving}}" bindtap="closeStaffing">取消</button>
         <button size="mini" class="primary-button" loading="{{staffing.saving}}" disabled="{{staffing.saving}}" bindtap="saveStaffing">保存绑定</button>
@@ -170,6 +185,9 @@
         <view class="subtitle">商品 {{item.itemTotalText}} · 时长费 {{item.serviceFeeText}} · 游戏师提成 {{item.commissionView.amountText}}</view>
         <view wx:for="{{item.commissionView.allocations}}" wx:for-item="allocation" wx:key="employeeId" class="subtitle">
           {{allocation.employeeName}}：{{allocation.amountText}}
+        </view>
+        <view wx:for="{{item.commissionView.specialItems}}" wx:for-item="special" wx:key="productId" class="subtitle special-commission-line special-commission-highlight">
+          特殊商品：{{special.employeeName || '待指定'}} · {{special.name}} × {{special.quantity}} · {{special.rateText}} · {{special.amountText}}
         </view>
       </view>
     </block>

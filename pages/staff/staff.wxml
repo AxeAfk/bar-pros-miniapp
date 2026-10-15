@@ -9,8 +9,10 @@
     <view wx:if="{{invite}}" class="editor">
       <view>邀请码：{{invite.code}}</view>
       <view class="subtitle">有效期至：{{invite.expiresAtText}}</view>
-      <image wx:if="{{invite.qrCodeUrl}}" class="invite-qrcode" mode="widthFix" src="{{invite.qrCodeUrl}}" />
+      <image wx:if="{{invite.qrCodeImage || invite.qrCodeUrl}}" class="invite-qrcode" mode="widthFix" src="{{invite.qrCodeImage || invite.qrCodeUrl}}" />
       <view wx:else class="subtitle">二维码暂未生成成功，可稍后重新生成邀请码。</view>
+      <view wx:if="{{invite.qrCodeEnvVersion === 'trial'}}" class="subtitle danger">当前二维码来自体验版，仅体验成员可扫码打开。</view>
+      <view wx:if="{{invite.qrCodeEnvVersion === 'develop'}}" class="subtitle danger">当前二维码来自开发版，仅项目开发者可扫码打开。</view>
       <view class="subtitle">受邀成员扫码后会自动加入后台成员列表。</view>
     </view>
     <view wx:if="{{!adminMembers.length && !loadingAdminMembers}}" class="subtitle">暂无后台成员</view>

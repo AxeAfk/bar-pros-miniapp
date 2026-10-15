@@ -1,5 +1,41 @@
 const store = require('../../services/store');
 
+function attachInviteImage(invite) {
+  if (!invite) return Promise.resolve(invite);
+  if (invite.qrCodeUrl) {
+    return Promise.resolve({ ...invite, qrCodeImage: invite.qrCodeUrl });
+  }
+  if (!invite.qrCodeDataUrl) {
+    return Promise.resolve(invite);
+  }
+  if (!wx.getFileSystemManager || !wx.env || !wx.env.USER_DATA_PATH) {
+    return Promise.resolve({ ...invite, qrCodeImage: invite.qrCodeDataUrl });
+  }
+  const filePath = `${wx.env.USER_DATA_PATH}/admin-invite-${invite.code}.png`;
+  return new Promise((resolve) => {
+    wx.getFileSystemManager().writeFile({
+      filePath,
+      data: invite.qrCodeDataUrl.replace(/^data:image\/png;base64,/, ''),
+      encoding: 'base64',
+      success: () => resolve({ ...invite, qrCodeImage: filePath }),
+      fail: () => resolve({ ...invite, qrCodeImage: invite.qrCodeDataUrl })
+    });
+  });
+}
+
+function inviteVersionHint(invite) {
+  if (!invite || !invite.qrCodeEnvVersion || invite.qrCodeEnvVersion === 'release') {
+    return '';
+  }
+  if (invite.qrCodeEnvVersion === 'trial') {
+    return '当前生成的是体验版二维码，只有已加入体验成员的微信才能扫码打开。';
+  }
+  if (invite.qrCodeEnvVersion === 'develop') {
+    return '当前生成的是开发版二维码，只有项目开发者微信才能扫码打开。';
+  }
+  return '';
+}
+
 Page({
   data: {
     adminProfile: { isAdmin: false, isOwner: false, ownerMaskedOpenid: '' },
@@ -38,9 +74,19 @@ Page({
     if (this.data.creatingInvite || !this.data.adminProfile.isOwner) return;
     this.setData({ creatingInvite: true });
     try {
-      const invite = await store.createAdminInvite();
+      const invite = await attachInviteImage(await store.createAdminInvite());
+      const versionHint = inviteVersionHint(invite);
+      if (typeof console !== 'undefined' && console && typeof console.warn === 'function') {
+        console.warn('[admin-invite] generated qr code', {
+          code: invite.code,
+          envVersion: invite.qrCodeEnvVersion || 'unknown',
+          hasTempUrl: Boolean(invite.qrCodeUrl),
+          hasInlineImage: Boolean(invite.qrCodeDataUrl),
+          versionHint
+        });
+      }
       this.setData({ invite });
-      wx.showToast({ title: '邀请码已生成' });
+      wx.showToast({ title: '邀请码已生成', icon: 'none' });
     } catch (error) {
       wx.showToast({ title: error.message || '邀请码生成失败', icon: 'none' });
     } finally {

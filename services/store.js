@@ -313,6 +313,33 @@ function getSettlements() {
   return read(KEYS.settlements, []);
 }
 
+function safeJson(value) {
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch (error) {
+    return `[unserializable: ${error && error.message ? error.message : 'unknown error'}]`;
+  }
+}
+
+function logCloudError(stage, action, data, details) {
+  if (typeof console !== 'undefined' && console && typeof console.error === 'function') {
+    const payload = {
+      action,
+      requestData: data || {},
+      details
+    };
+    const summary = details && details.result && details.result.error
+      ? details.result.error
+      : details && details.message
+        ? details.message
+        : details && details.errMsg
+          ? details.errMsg
+          : '';
+    console.error(`[barApi:${action}] ${stage}${summary ? `: ${summary}` : ''}`);
+    console.error(`[barApi:${action}] payload\n${safeJson(payload)}`);
+  }
+}
+
 function callCloud(action, data) {
   if (!cloudEnvId) {
     return Promise.reject(new Error('请先在 config/app.js 配置微信云开发环境 ID'));
@@ -326,11 +353,24 @@ function callCloud(action, data) {
     data: { action, ...(data || {}) }
   }).then((response) => {
     if (!response || !response.result || response.result.success !== true) {
-      throw new Error(response && response.result && response.result.error
+      const message = response && response.result && response.result.error
         ? response.result.error
-        : '云端请求失败');
+        : '云端请求失败';
+      logCloudError('business failure', action, data, response);
+      const error = new Error(message);
+      error._cloudLogged = true;
+      throw error;
     }
     return response.result.data;
+  }).catch((error) => {
+    if (!error || !error._cloudLogged) {
+      logCloudError('transport failure', action, data, {
+        message: error && error.message,
+        errMsg: error && error.errMsg,
+        stack: error && error.stack
+      });
+    }
+    throw error;
   });
 }
 

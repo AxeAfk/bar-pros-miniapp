@@ -67,7 +67,6 @@
 
 .table-grid {
   display: grid;
-  grid-template-columns: 1fr 1fr;
   gap: 16rpx;
   margin-top: 20rpx;
 }
@@ -229,19 +228,69 @@
   padding: 16rpx;
   background: #101014;
   border-radius: 16rpx;
+  border: 1rpx solid rgba(255, 255, 255, 0.06);
+}
+
+.special-commission-line {
+  margin-top: 8rpx;
+  padding-left: 8rpx;
+}
+
+.special-commission-highlight {
+  padding: 10rpx 14rpx;
+  color: #f6d18b;
+  background: rgba(214, 163, 84, 0.12);
+  border-left: 4rpx solid #d6a354;
+  border-radius: 12rpx;
+}
+
+.special-commission-summary {
+  margin-top: 12rpx;
+  color: #f0c77a;
+}
+
+.special-item-commission {
+  display: inline-block;
+  margin-top: 8rpx;
+  padding: 6rpx 10rpx;
+  color: #f6d18b;
+  background: rgba(214, 163, 84, 0.12);
+  border-radius: 10rpx;
 }
 
 .staff-option {
   display: flex;
+  align-items: center;
   justify-content: space-between;
   margin-top: 16rpx;
   padding: 20rpx;
   background: #101014;
   border: 1rpx solid rgba(255, 255, 255, 0.08);
   border-radius: 16rpx;
+  transition: border-color 0.2s ease, background 0.2s ease;
 }
 
 .staff-option.selected {
   border-color: #d6a354;
-  color: #f0c77a;
+  background: rgba(214, 163, 84, 0.1);
+}
+
+.staff-option-name {
+  font-size: 30rpx;
+  font-weight: 700;
+}
+
+.staff-option-status {
+  min-width: 112rpx;
+  padding: 8rpx 14rpx;
+  color: #aaa7b2;
+  text-align: center;
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 999rpx;
+  font-size: 22rpx;
+}
+
+.staff-option-status.selected {
+  color: #20170a;
+  background: #d6a354;
 }

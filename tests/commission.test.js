@@ -75,10 +75,57 @@ test('dynamic service segments shared goods and designated goods are split corre
     { employeeId: 'A', serviceAmountCents: 3960, goodsSharedAmountCents: 500, specialAmountCents: 0, amountCents: 4460 },
     { employeeId: 'B', serviceAmountCents: 1980, goodsSharedAmountCents: 500, specialAmountCents: 15000, amountCents: 17480 }
   ]);
-  assert.equal(commissionView(summary.commission).amountText, '¥219.40');
+  const view = commissionView(summary.commission);
+  assert.equal(view.amountText, '¥219.40');
+  assert.equal(view.specialItems.length, 1);
+  assert.equal(view.specialItems[0].name, '香槟');
+  assert.equal(view.specialItems[0].employeeName, 'Bob');
+  assert.equal(view.specialItems[0].rateText, '30%');
+  assert.equal(view.specialItems[0].amountText, '¥150.00');
+  assert.equal(view.allocations[1].specialItems.length, 1);
+  assert.equal(view.allocations[1].specialItems[0].name, '香槟');
+  assert.equal(view.allocations[1].specialItems[0].amountText, '¥150.00');
 });
 
-function loadApi() {
+test('service fee keeps each game master on an independent continuous hourly clock', () => {
+  const startedAt = Date.now() - (61 * 60 * 1000);
+  const halfHour = 30 * 60 * 1000;
+  const session = {
+    id: 'S1',
+    tableId: 'T01',
+    tableName: '1号桌',
+    startedAt,
+    currentStaffIds: ['A', 'B'],
+    staffSegments: [
+      { startAt: startedAt, endAt: startedAt + halfHour, staffIds: ['A'] },
+      { startAt: startedAt + halfHour, endAt: startedAt + (61 * 60 * 1000), staffIds: ['A', 'B'] }
+    ]
+  };
+  const summary = rules.summarizeSession(session, [], startedAt + (61 * 60 * 1000), 99, {
+    A: { id: 'A', name: 'Alice' },
+    B: { id: 'B', name: 'Bob' }
+  });
+  assert.equal(summary.serviceFee, 297);
+  assert.equal(summary.commission.serviceAmountCents, 5940);
+  assert.equal(summary.commission.allocations.length, 2);
+  assert.deepEqual(summary.commission.allocations.map((entry) => ({
+    employeeId: entry.employeeId,
+    serviceAmountCents: entry.serviceAmountCents
+  })), [
+    { employeeId: 'A', serviceAmountCents: 3960 },
+    { employeeId: 'B', serviceAmountCents: 1980 }
+  ]);
+  assert.deepEqual(summary.commission.serviceSegments.map((entry) => ({
+    employeeId: entry.employeeId,
+    billedHours: entry.billedHours,
+    serviceFee: entry.serviceFee
+  })), [
+    { employeeId: 'A', billedHours: 2, serviceFee: 198 },
+    { employeeId: 'B', billedHours: 1, serviceFee: 99 }
+  ]);
+});
+
+function loadApi(options = {}) {
   let documents = {
     bar_tables: {},
     bar_sessions: {},
@@ -89,6 +136,7 @@ function loadApi() {
     bar_admin_invites: {}
   };
   let openid = 'admin';
+  const qrRequests = [];
   const getField = (document, field) => field.split('.').reduce((value, key) => value && value[key], document);
   const collection = (name) => {
     let filter = null;
@@ -139,13 +187,33 @@ function loadApi() {
     database: () => db,
     getWXContext: () => ({ OPENID: openid }),
     DYNAMIC_CURRENT_ENV: 'test',
-    openapi: { wxacode: { getUnlimited: async () => ({ buffer: Buffer.from('invite') }) } },
-    uploadFile: async ({ cloudPath }) => ({ fileID: `cloud://${cloudPath}` }),
-    getTempFileURL: async ({ fileList }) => ({ fileList: [{ status: 0, tempFileURL: `https://example.invalid/${fileList[0]}` }] })
+    openapi: {
+      wxacode: {
+        getUnlimited: async (request) => {
+          qrRequests.push(request);
+          const failingVersions = Array.isArray(options.failWxacodeVersions) ? options.failWxacodeVersions : [];
+          if (options.failWxacode || failingVersions.includes(request.envVersion)) throw new Error('wxacode unavailable');
+          return { buffer: Buffer.from('invite') };
+        }
+      }
+    },
+    uploadFile: async ({ cloudPath }) => {
+      if (options.failUpload) throw new Error('upload failed');
+      return { fileID: `cloud://${cloudPath}` };
+    },
+    getTempFileURL: async ({ fileList }) => ({
+      fileList: [{
+        status: options.failTempUrl ? -1 : 0,
+        tempFileURL: options.failTempUrl ? '' : `https://example.invalid/${fileList[0]}`,
+        errMsg: options.failTempUrl ? 'temp url unavailable' : 'ok'
+      }]
+    })
   };
   const context = {
     exports: {},
     process: { env: { OWNER_OPENID: 'admin', ADMIN_OPENIDS: 'admin' } },
+    console: { error() {} },
+    Buffer,
     require: (id) => {
       if (id === 'wx-server-sdk') return cloud;
       if (id === './order-notifications') return { notifyWecomRobot: async () => ({ success: true }) };
@@ -154,7 +222,12 @@ function loadApi() {
   };
   vm.runInNewContext(fs.readFileSync(path.join(apiDirectory, 'index.js'), 'utf8'), context);
   return {
-    call: async (action, data = {}) => (await context.exports.main({ action, ...data })).data,
+    call: async (action, data = {}) => {
+      const result = await context.exports.main({ action, ...data });
+      if (!result.success) throw new Error(result.error);
+      return result.data;
+    },
+    qrRequests: () => qrRequests.slice(),
     documents: () => documents,
     setUser: (value) => { openid = value; }
   };
@@ -213,6 +286,7 @@ test('owner can invite and remove backend members while members cannot manage pe
   const invite = await api.call('createAdminInvite');
   assert.match(invite.code, /^[A-Z0-9]{8}$/);
   assert.ok(invite.qrCodeUrl);
+  assert.ok(invite.qrCodeDataUrl);
   api.setUser('member-openid');
   const accepted = await api.call('acceptAdminInvite', { code: invite.code });
   assert.equal(accepted.joined, true);
@@ -227,6 +301,27 @@ test('owner can invite and remove backend members while members cannot manage pe
   await api.call('removeAdminMember', { openid: 'member-openid' });
   api.setUser('member-openid');
   await assert.rejects(api.call('getTableDetail', { tableId: 'T01' }), /未获管理员授权/);
+});
+
+test('invite generation falls back to inline qr image data when upload url is unavailable', async () => {
+  const api = loadApi({ failTempUrl: true });
+  const invite = await api.call('createAdminInvite');
+  assert.equal(invite.qrCodeUrl, '');
+  assert.match(invite.qrCodeDataUrl, /^data:image\/png;base64,/);
+});
+
+test('invite generation falls back from release to trial when release wxacode fails', async () => {
+  const api = loadApi({ failWxacodeVersions: ['release'] });
+  const invite = await api.call('createAdminInvite');
+  assert.equal(invite.qrCodeEnvVersion, 'trial');
+  assert.equal(api.qrRequests().map((entry) => entry.envVersion).join(','), 'release,trial');
+  assert.equal(api.qrRequests()[0].checkPath, true);
+  assert.equal(api.qrRequests()[1].checkPath, false);
+});
+
+test('invite generation fails when wxacode image cannot be generated', async () => {
+  const api = loadApi({ failWxacode: true });
+  await assert.rejects(api.call('createAdminInvite'), /release: .*trial: .*develop:/);
 });
 
 test('local mode keeps the same staffing and settlement rules', async () => {

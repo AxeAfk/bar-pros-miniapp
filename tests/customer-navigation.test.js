@@ -239,15 +239,17 @@ test('admin has no subscription entry and still displays new-order toasts', asyn
   assert.equal(calls.length, 1);
 });
 
-test('menu accumulated spending excludes pending items and resets after clearing', () => {
+test('menu accumulated spending uses hourly service-fee steps and resets after clearing', () => {
   const { page } = loadPage('menu');
   page.products = [{ id: 'P1', name: 'Drink', price: 38 }];
   page.cart = {};
-  page._sessionStartedAt = Date.now() - 5000;
-  page._sessionItemTotalCents = 7600;
-  page._serviceFeeBaseCents = 9900;
-  page._serviceFeeBaseAt = Date.now();
-  page._currentServiceRateCentsPerHour = 0;
+  const now = Date.now();
+  page._liveSession = {
+    startedAt: now - (59 * 60 * 1000),
+    itemTotal: 76,
+    itemTotalCents: 7600,
+    staffSegments: [{ startAt: now - (59 * 60 * 1000), endAt: null, staffIds: ['A'] }]
+  };
   page.updateSessionClock();
   assert.equal(page.data.itemTotalText, '\u00a576.00');
   assert.equal(page.data.serviceFeeText, '\u00a599.00');
@@ -257,11 +259,13 @@ test('menu accumulated spending excludes pending items and resets after clearing
   assert.equal(page.data.cartTotalText, '\u00a538.00');
   assert.equal(page.data.sessionTotalText, '\u00a5175.00');
 
-  page._serviceFeeBaseCents = 19800;
+  page._liveSession.startedAt = now - (61 * 60 * 1000);
+  page._liveSession.staffSegments[0].startAt = now - (61 * 60 * 1000);
   page.updateSessionClock();
   assert.equal(page.data.serviceFeeText, '\u00a5198.00');
   assert.equal(page.data.sessionTotalText, '\u00a5274.00');
 
+  page._liveSession = null;
   page._sessionStartedAt = null;
   page._sessionItemTotalCents = 0;
   page._serviceFeeBaseCents = 0;
@@ -318,7 +322,16 @@ test('checkout previews auto-computed commission and blocks incomplete commissio
         specialAmountCents: 10000,
         serviceAmountCents: 1980,
         amountCents: 16980,
-        allocations: [],
+        allocations: [{
+          employeeId: 'A',
+          employeeName: 'Alice',
+          amountCents: 6980,
+          serviceAmountCents: 1980,
+          goodsSharedAmountCents: 5000,
+          specialAmountCents: 0,
+          specialItems: []
+        }],
+        specialItems: [{ productId: 'p019', name: '香槟', quantity: 1, amountCents: 10000, rateBps: 3000, designatedStaffId: 'B' }],
         unassignedItems: [{ name: '香槟', amountCents: 10000 }]
       }
     }),
@@ -327,6 +340,9 @@ test('checkout previews auto-computed commission and blocks incomplete commissio
   await page.checkout({ currentTarget: { dataset: { tableId: 'T01' } } });
   assert.equal(page.data.checkoutBill.totalText, '\u00a5599.00');
   assert.equal(page.data.checkoutBill.commissionView.amountText, '\u00a5169.80');
+  assert.equal(page.data.checkoutBill.commissionView.specialItems[0].name, '香槟');
+  assert.equal(page.data.checkoutBill.commissionView.specialItems[0].rateText, '30%');
+  assert.equal(page.data.checkoutBill.commissionView.specialItems[0].amountText, '\u00a5100.00');
   await page.confirmPayment();
   assert.equal(settlements.length, 0);
   assert.equal(page.data.showCommission, true);
@@ -347,6 +363,15 @@ test('staffing sheet updates a table assignment and special admin orders require
   });
   await page.refresh();
   await page.openStaffing({ currentTarget: { dataset: { tableId: 'T01' } } });
+  page.toggleStaffOption({ currentTarget: { dataset: { id: 'A' } } });
+  assert.equal(page.data.staffing.selectedIds.join(','), 'A');
+  assert.equal(page.data.staffing.employees[0].selected, true);
+  assert.equal(page.data.staffing.employees[0].selectedText, '已选');
+  assert.equal(page.data.staffing.selectedNamesText, 'Alice');
+  page.toggleStaffOption({ currentTarget: { dataset: { id: 'A' } } });
+  assert.equal(page.data.staffing.selectedIds.length, 0);
+  assert.equal(page.data.staffing.employees[0].selected, false);
+  assert.equal(page.data.staffing.selectedNamesText, '');
   page.toggleStaffOption({ currentTarget: { dataset: { id: 'A' } } });
   await page.saveStaffing();
   assert.equal(JSON.stringify(saved[0]), JSON.stringify({ tableId: 'T01', staffIds: ['A'] }));
@@ -438,4 +463,23 @@ test('staff page owners can generate invite QR and remove joined admin members',
   await removing;
   assert.equal(removed[0], 'member1');
   assert.equal(page.data.records, undefined);
+});
+
+test('staff page can display invite QR from inline image data', async () => {
+  const { page } = loadPage('staff', {
+    getAdminProfile: async () => ({ isAdmin: true, isOwner: true, ownerMaskedOpenid: 'owne…1234' }),
+    listAdminMembers: async () => [],
+    createAdminInvite: async () => ({
+      code: 'INV12345',
+      expiresAtText: '2026-10-16 03:30',
+      qrCodeDataUrl: 'data:image/png;base64,ZmFrZQ==',
+      qrCodeEnvVersion: 'trial'
+    }),
+    listEmployees: async () => []
+  });
+  await page.onShow();
+  await page.createInvite();
+  assert.equal(page.data.invite.code, 'INV12345');
+  assert.equal(page.data.invite.qrCodeImage, 'data:image/png;base64,ZmFrZQ==');
+  assert.equal(page.data.invite.qrCodeEnvVersion, 'trial');
 });
