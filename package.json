@@ -1,0 +1,17 @@
+{
+  "name": "bar-pos-miniapp",
+  "version": "0.1.0",
+  "private": true,
+  "description": "酒吧扫码点单收银微信小程序",
+  "scripts": {
+    "check": "node -e \"console.log('Open this project with WeChat DevTools to build and preview.')\"",
+    "preview": "python3 -m http.server 5173 -d preview",
+    "upload": "node scripts/upload.js"
+  },
+  "devDependencies": {
+    "miniprogram-api-typings": "^3.12.3"
+  },
+  "dependencies": {
+    "miniprogram-ci": "^2.1.31"
+  }
+}

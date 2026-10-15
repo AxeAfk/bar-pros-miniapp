@@ -1,0 +1,39 @@
+<view class="page">
+  <view class="section">
+    <view class="row">
+      <view>
+        <view class="title">{{tableName}}</view>
+        <view class="subtitle">{{checkoutTitle}}</view>
+      </view>
+      <view class="price">{{cartTotalText}}</view>
+    </view>
+  </view>
+
+  <scroll-view class="category-tabs" scroll-x>
+    <view wx:for="{{categories}}" wx:key="id" class="tab {{activeCategoryId === item.id ? 'active' : ''}}" data-id="{{item.id}}" bindtap="selectCategory">
+      {{item.name}}
+    </view>
+  </scroll-view>
+
+  <view class="product-list">
+    <view wx:for="{{visibleProducts}}" wx:key="id" class="section product">
+      <view>
+        <view class="product-name">{{item.name}}</view>
+        <view class="subtitle">{{item.priceText}}</view>
+      </view>
+      <view class="counter">
+        <button class="secondary-button count-btn" data-id="{{item.id}}" bindtap="decrease">-</button>
+        <text>{{item.quantity}}</text>
+        <button class="primary-button count-btn" data-id="{{item.id}}" bindtap="increase">+</button>
+      </view>
+    </view>
+  </view>
+
+  <view class="checkout-bar">
+    <view>
+      <view class="muted">共 {{cartCount}} 件</view>
+      <view class="price">{{cartTotalText}}</view>
+    </view>
+    <button class="primary-button checkout-btn" bindtap="submitOrder">{{checkoutButtonText}}</button>
+  </view>
+</view>

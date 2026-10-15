@@ -1,0 +1,33 @@
+<view class="page">
+  <view class="section">
+    <view class="title">会员信息</view>
+    <view class="subtitle">个人号版本先展示会员资料，线上充值后续在经营主体版本开放</view>
+  </view>
+
+  <view wx:for="{{members}}" wx:key="id" class="section">
+    <view class="row">
+      <view>
+        <view class="member-name">{{item.name}}</view>
+        <view class="subtitle">{{item.phone}}</view>
+      </view>
+      <view class="price">{{item.balanceText}}</view>
+    </view>
+  </view>
+
+  <view wx:if="{{memberRechargeEnabled}}" class="section">
+    <view class="member-name">充值档位</view>
+    <view wx:for="{{plans}}" wx:key="id" class="plan row" data-id="{{item.id}}" bindtap="selectPlan">
+      <view>
+        <view>充值 {{item.amountText}}</view>
+        <view class="subtitle">赠送 {{item.giftText}}</view>
+      </view>
+      <text class="{{selectedPlanId === item.id ? 'price' : 'muted'}}">{{selectedPlanId === item.id ? '已选' : '选择'}}</text>
+    </view>
+    <button class="primary-button" bindtap="recharge">模拟充值</button>
+  </view>
+
+  <view wx:else class="section">
+    <view class="member-name">当前说明</view>
+    <view class="subtitle">顾客可先扫码下单，会员充值与线上支付留待个体户/企业主体版本接入。</view>
+  </view>
+</view>

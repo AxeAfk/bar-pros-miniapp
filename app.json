@@ -1,0 +1,17 @@
+{
+  "pages": [
+    "pages/menu/menu",
+    "pages/bill/bill",
+    "pages/tables/tables",
+    "pages/member/member",
+    "pages/admin/admin"
+  ],
+  "window": {
+    "navigationBarTitleText": "扫码点单",
+    "navigationBarBackgroundColor": "#101014",
+    "navigationBarTextStyle": "white",
+    "backgroundColor": "#101014"
+  },
+  "style": "v2",
+  "sitemapLocation": "sitemap.json"
+}

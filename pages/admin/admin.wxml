@@ -1,0 +1,43 @@
+<view class="page">
+  <view class="section">
+    <view class="title">管理员后台</view>
+    <view class="subtitle">单角色全权限 · 订单 / 桌台 / 会员概览</view>
+  </view>
+
+  <view class="stats">
+    <view class="section stat-card">
+      <view class="muted">今日订单</view>
+      <view class="stat-value">{{stats.orderCount}}</view>
+    </view>
+    <view class="section stat-card">
+      <view class="muted">{{amountLabel}}</view>
+      <view class="stat-value price">{{stats.revenueText}}</view>
+    </view>
+  </view>
+
+  <view class="section">
+    <view class="row header">
+      <view class="section-title">桌台状态</view>
+      <button class="secondary-button small-btn" bindtap="goTables">去点单</button>
+    </view>
+    <view wx:for="{{tables}}" wx:key="id" class="row list-row">
+      <text>{{item.name}}</text>
+      <text class="{{item.status === 'using' ? 'price' : 'muted'}}">{{item.statusText}}</text>
+    </view>
+  </view>
+
+  <view class="section">
+    <view class="section-title">最近订单</view>
+    <view wx:if="{{!orders.length}}" class="subtitle empty">暂无订单</view>
+    <view wx:for="{{orders}}" wx:key="id" class="list-row order-row">
+      <view class="row">
+        <view>
+          <view>{{item.tableName}}</view>
+          <view class="subtitle">{{item.createdAtText}}</view>
+        </view>
+        <view class="price">{{item.totalText}}</view>
+      </view>
+      <view class="subtitle">{{item.statusText}} · {{item.id}}</view>
+    </view>
+  </view>
+</view>

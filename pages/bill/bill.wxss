@@ -1,0 +1,18 @@
+.bill {
+  margin-top: 30rpx;
+}
+
+.divider {
+  height: 1rpx;
+  margin: 26rpx 0;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.item-row {
+  margin-bottom: 18rpx;
+}
+
+.total {
+  font-size: 36rpx;
+  font-weight: 700;
+}
