@@ -1,0 +1,4 @@
+<view class="scan-page">
+  <view class="scan-message">{{message}}</view>
+  <button wx:if="{{!resolving}}" size="mini" class="scan-button" loading="{{scanning}}" disabled="{{scanning}}" bindtap="scanTable">扫一扫桌面二维码</button>
+</view>

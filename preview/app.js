@@ -79,7 +79,7 @@ function renderTables() {
   return `
     <div class="section row">
       <div>
-        <div class="title">DODO BAR</div>
+        <div class="title">迷因酒馆</div>
         <div class="subtitle">扫码点单 · 提交订单 · 个人号演示版</div>
       </div>
       <button class="secondary" style="width:96px;margin:0" onclick="setPage('admin')">管理</button>

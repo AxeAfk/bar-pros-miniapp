@@ -1,0 +1,26 @@
+.scan-page {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 48rpx;
+  background: #121214;
+}
+
+.scan-message {
+  color: #aaa39a;
+  font-size: 28rpx;
+  line-height: 1.8;
+  text-align: center;
+}
+
+.scan-page button.scan-button[size="mini"] {
+  width: 440rpx;
+  max-width: 100%;
+  margin-top: 32rpx;
+  color: #241c10;
+  background: #e6bb70;
+  border-radius: 18rpx;
+  font-size: 28rpx;
+}

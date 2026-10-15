@@ -1,5 +1,9 @@
 function normalizeTableId(value) {
-  return decodeURIComponent(String(value || '').trim()).toUpperCase();
+  const tableId = decodeURIComponent(String(value || '').trim()).toUpperCase();
+  if (/^\d{1,2}$/.test(tableId)) {
+    return `T${tableId.padStart(2, '0')}`;
+  }
+  return tableId;
 }
 
 function parseScene(scene) {
@@ -12,12 +16,15 @@ function parseScene(scene) {
     const parts = decoded.split('&');
     const values = {};
     parts.forEach((part) => {
-      const [key, value] = part.split('=');
+      const separator = part.indexOf('=');
+      const key = separator < 0 ? part : part.slice(0, separator);
+      const value = separator < 0 ? '' : part.slice(separator + 1);
       if (key) {
         values[key] = value;
       }
     });
-    return normalizeTableId(values.tableId || values.tid);
+    return normalizeTableId(values.table_id || values.tableId || values.tid) ||
+      (values.scene ? parseScene(values.scene) : '');
   }
 
   return normalizeTableId(decoded);
@@ -28,7 +35,7 @@ function getEntryTableId(options) {
     return '';
   }
 
-  return normalizeTableId(options.tableId || options.tid) || parseScene(options.scene);
+  return normalizeTableId(options.table_id || options.tableId || options.tid) || parseScene(options.scene);
 }
 
 module.exports = {

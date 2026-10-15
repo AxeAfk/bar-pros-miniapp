@@ -1,9 +1,10 @@
 {
+  "lazyCodeLoading": "requiredComponents",
   "pages": [
+    "pages/entry/entry",
+    "pages/tables/tables",
     "pages/menu/menu",
     "pages/bill/bill",
-    "pages/tables/tables",
-    "pages/member/member",
     "pages/admin/admin"
   ],
   "window": {

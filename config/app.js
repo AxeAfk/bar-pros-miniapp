@@ -1,13 +1,14 @@
 module.exports = {
-  cloudEnvId: '',
+  cloudEnvId: 'cloud1-d0gaix12o534b4daf',
+  storageMode: 'cloud',
+  orderNotificationTemplateId: 'wO1VECzgDEqinluVIXOxcNb_GLUca7AV2txXiMth0Mk',
   releaseMode: 'personal',
-  checkoutMode: 'order_only',
-  enableMockPayment: true,
+  hourlyServiceFee: 99,
   memberRechargeEnabled: false,
   shop: {
-    name: 'DODO BAR',
-    phone: '请补充店铺电话',
-    address: '请补充店铺地址'
+    name: '迷因酒馆',
+    phone: '18844463336',
+    address: '朝阳区盛世国际A座6010'
   },
   rechargePlans: [
     { id: 'r5000', amount: 5000, gift: 300 },

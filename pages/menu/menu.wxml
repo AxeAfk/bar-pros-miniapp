@@ -1,39 +1,56 @@
-<view class="page">
-  <view class="section">
-    <view class="row">
-      <view>
-        <view class="title">{{tableName}}</view>
-        <view class="subtitle">{{checkoutTitle}}</view>
-      </view>
-      <view class="price">{{cartTotalText}}</view>
+<view class="menu-page">
+  <view class="spending-panel">
+    <view class="table-header">
+      <view class="table-badge">{{tableName}}</view>
+      <view class="timer">{{timerHint}}</view>
     </view>
+    <view class="spending-top">
+      <text class="spending-label">本桌累计消费</text>
+      <text class="spending-total">{{sessionTotalText}}</text>
+    </view>
+    <view class="spending-breakdown">
+      <view class="breakdown-item">
+        <text class="secondary-text">已下单商品</text>
+        <text class="breakdown-amount">{{itemTotalText}}</text>
+      </view>
+      <text class="breakdown-plus">+</text>
+      <view class="breakdown-item">
+        <text class="secondary-text">时长服务费</text>
+        <text class="breakdown-amount">{{serviceFeeText}}</text>
+      </view>
+    </view>
+    <view class="spending-note">不含本次待下单商品</view>
   </view>
 
-  <scroll-view class="category-tabs" scroll-x>
-    <view wx:for="{{categories}}" wx:key="id" class="tab {{activeCategoryId === item.id ? 'active' : ''}}" data-id="{{item.id}}" bindtap="selectCategory">
-      {{item.name}}
-    </view>
-  </scroll-view>
-
-  <view class="product-list">
-    <view wx:for="{{visibleProducts}}" wx:key="id" class="section product">
-      <view>
-        <view class="product-name">{{item.name}}</view>
-        <view class="subtitle">{{item.priceText}}</view>
-      </view>
-      <view class="counter">
-        <button class="secondary-button count-btn" data-id="{{item.id}}" bindtap="decrease">-</button>
-        <text>{{item.quantity}}</text>
-        <button class="primary-button count-btn" data-id="{{item.id}}" bindtap="increase">+</button>
-      </view>
-    </view>
+  <view class="list-heading">
+    <text class="list-title">酒水与小食</text>
+    <text class="secondary-text">{{isAdminOrder ? '代客点单 · ' : ''}}{{productCount}} 款可选</text>
   </view>
+  <view class="billing-note">首单起计 · {{hourlyServiceFee}}元/小时，不足一小时按一小时计</view>
 
-  <view class="checkout-bar">
-    <view>
-      <view class="muted">共 {{cartCount}} 件</view>
-      <view class="price">{{cartTotalText}}</view>
+  <view class="menu-list">
+    <view wx:for="{{visibleProducts}}" wx:key="id" class="menu-item {{item.quantity > 0 ? 'menu-item-selected' : ''}}">
+      <view class="item-info">
+        <view class="item-name">{{item.name}}</view>
+        <view class="item-price">{{item.priceText}}</view>
+      </view>
+      <view class="quantity-control">
+        <button size="mini" class="quantity-button minus-button" disabled="{{item.quantity === 0 || submitting}}" data-id="{{item.id}}" bindtap="decrease" aria-label="减少{{item.name}}">−</button>
+        <text class="quantity-value">{{item.quantity}}</text>
+        <button size="mini" class="quantity-button plus-button" disabled="{{submitting}}" data-id="{{item.id}}" bindtap="increase" aria-label="增加{{item.name}}">+</button>
+      </view>
     </view>
-    <button class="primary-button checkout-btn" bindtap="submitOrder">{{checkoutButtonText}}</button>
+    <view wx:if="{{!visibleProducts.length}}" class="empty-menu">暂无在售商品</view>
+  </view>
+  <view class="list-footnote">选好后提交，商品消费与本桌时长费统一结算</view>
+
+  <button wx:if="{{isAdmin}}" size="mini" class="admin-entry" bindtap="goAdmin">管理后台 ↗</button>
+
+  <view class="checkout-dock">
+    <view class="cart-summary">
+      <view class="cart-label">本次待下单{{cartCount > 0 ? ' · ' + cartCount + ' 件' : ''}}</view>
+      <view class="cart-amount">{{cartTotalText}}</view>
+    </view>
+    <button size="mini" class="submit-button" disabled="{{submitting || cartCount === 0}}" bindtap="submitOrder">{{submitting ? '正在提交…' : checkoutButtonText}}</button>
   </view>
 </view>

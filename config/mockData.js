@@ -1,32 +1,36 @@
-const tables = [
-  { id: 'T01', name: '1号桌', area: '大厅', status: 'idle' },
-  { id: 'T02', name: '2号桌', area: '大厅', status: 'idle' },
-  { id: 'T03', name: '3号桌', area: '大厅', status: 'idle' },
-  { id: 'T04', name: '4号桌', area: '大厅', status: 'idle' },
-  { id: 'T05', name: '5号桌', area: '卡座', status: 'idle' },
-  { id: 'T06', name: '6号桌', area: '卡座', status: 'idle' }
-];
+const tables = Array.from({ length: 6 }, (_, index) => {
+  const number = index + 1;
+  const tableCode = String(number).padStart(2, '0');
+  return {
+    id: `T${tableCode}`,
+    name: `${number}号桌`,
+    area: '大厅',
+    status: 'idle'
+  };
+});
 
 const menuCategories = [
   { id: 'beer', name: '啤酒' },
+  { id: 'wine', name: '香槟' },
   { id: 'whisky', name: '洋酒' },
-  { id: 'cocktail', name: '鸡尾酒' },
-  { id: 'snack', name: '小吃' },
-  { id: 'set', name: '套餐' }
+  { id: 'drink', name: '其他饮品' }
 ];
 
 const products = [
-  { id: 'p001', categoryId: 'beer', name: '百威啤酒', price: 38, onSale: true },
-  { id: 'p002', categoryId: 'beer', name: '科罗娜', price: 45, onSale: true },
-  { id: 'p003', categoryId: 'beer', name: '精酿 IPA', price: 58, onSale: true },
-  { id: 'p004', categoryId: 'whisky', name: '芝华士 12 年', price: 588, onSale: true },
-  { id: 'p005', categoryId: 'whisky', name: '杰克丹尼', price: 528, onSale: true },
-  { id: 'p006', categoryId: 'cocktail', name: '莫吉托', price: 68, onSale: true },
-  { id: 'p007', categoryId: 'cocktail', name: '长岛冰茶', price: 78, onSale: true },
-  { id: 'p008', categoryId: 'snack', name: '薯条', price: 32, onSale: true },
-  { id: 'p009', categoryId: 'snack', name: '炸鸡拼盘', price: 88, onSale: true },
-  { id: 'p010', categoryId: 'set', name: '6瓶啤酒套餐', price: 198, onSale: true },
-  { id: 'p011', categoryId: 'set', name: '洋酒畅饮套餐', price: 888, onSale: true }
+  { id: 'p001', categoryId: 'beer', name: '百威啤酒', price: 25, onSale: true },
+  { id: 'p002', categoryId: 'beer', name: '科罗娜', price: 30, onSale: true },
+  { id: 'p012', categoryId: 'beer', name: '福佳白', price: 30, onSale: true },
+  { id: 'p013', categoryId: 'beer', name: '百威铝罐', price: 40, onSale: true },
+  { id: 'p014', categoryId: 'beer', name: '青岛铝罐', price: 40, onSale: true },
+  { id: 'p015', categoryId: 'beer', name: '诱惑1号', price: 50, onSale: true },
+  { id: 'p016', categoryId: 'beer', name: '诱惑7号', price: 50, onSale: true },
+  { id: 'p017', categoryId: 'beer', name: '诱惑9号', price: 50, onSale: true },
+  { id: 'p018', categoryId: 'beer', name: '1664白啤', price: 50, onSale: true },
+  { id: 'p019', categoryId: 'wine', name: '香槟', price: 500, onSale: true },
+  { id: 'p020', categoryId: 'whisky', name: '轩尼诗VSOP', price: 2500, onSale: true },
+  { id: 'p021', categoryId: 'drink', name: '动力苏打酒', price: 20, onSale: true },
+  { id: 'p022', categoryId: 'drink', name: '矿泉水', price: 10, onSale: true },
+  { id: 'p023', categoryId: 'drink', name: '可乐', price: 10, onSale: true }
 ];
 
 module.exports = {
