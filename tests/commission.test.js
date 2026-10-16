@@ -125,6 +125,49 @@ test('service fee keeps each game master on an independent continuous hourly clo
   ]);
 });
 
+test('designated specials can split one multi-quantity line across multiple game masters', () => {
+  const startedAt = Date.now() - (60 * 60 * 1000);
+  const session = {
+    id: 'S1',
+    tableId: 'T01',
+    tableName: '1号桌',
+    startedAt,
+    currentStaffIds: ['A', 'B'],
+    staffSegments: [{ startAt: startedAt, endAt: startedAt + (60 * 60 * 1000), staffIds: ['A', 'B'] }]
+  };
+  const summary = rules.summarizeSession(session, [{
+    id: 'O1',
+    totalAmount: 2500,
+    items: [{
+      productId: 'p020',
+      name: '轩尼诗VSOP',
+      price: 500,
+      quantity: 5,
+      commission: {
+        scope: 'designated',
+        rateBps: 3000,
+        amountCents: 75000,
+        designatedAllocations: [{ staffId: 'A', quantity: 3 }, { staffId: 'B', quantity: 2 }]
+      }
+    }]
+  }], startedAt + (60 * 60 * 1000), 99, {
+    A: { id: 'A', name: 'Alice' },
+    B: { id: 'B', name: 'Bob' }
+  });
+  assert.equal(summary.commission.specialItems.length, 2);
+  assert.deepEqual(summary.commission.specialItems.map((entry) => ({
+    designatedStaffId: entry.designatedStaffId,
+    quantity: entry.quantity,
+    amountCents: entry.amountCents
+  })), [
+    { designatedStaffId: 'A', quantity: 3, amountCents: 45000 },
+    { designatedStaffId: 'B', quantity: 2, amountCents: 30000 }
+  ]);
+  assert.equal(summary.commission.unassignedItems.length, 0);
+  assert.equal(summary.commission.allocations.find((entry) => entry.employeeId === 'A').specialAmountCents, 45000);
+  assert.equal(summary.commission.allocations.find((entry) => entry.employeeId === 'B').specialAmountCents, 30000);
+});
+
 function loadApi(options = {}) {
   let documents = {
     bar_tables: {},
@@ -282,6 +325,24 @@ test('cloud flow assigns special items after ordering and snapshots settlement a
   assert.equal(paid.commission.payoutStatus, 'paid');
 });
 
+test('cloud dashboard table totals include ordered goods as well as service fees', async () => {
+  const api = loadApi();
+  const alice = await api.call('saveEmployee', { employee: { name: 'Alice', active: true } });
+  await api.call('updateTableStaff', { tableId: 'T01', staffIds: [alice.id] });
+  await api.call('submitOrder', {
+    tableId: 'T01',
+    source: 'admin',
+    items: [{ productId: 'p001', quantity: 2 }]
+  });
+
+  const dashboard = await api.call('getDashboard');
+  const table = dashboard.tables.find((entry) => entry.id === 'T01');
+
+  assert.equal(table.itemTotal, 50);
+  assert.equal(table.serviceFee, 99);
+  assert.equal(table.totalAmount, 149);
+});
+
 test('special goods are auto-assigned to the sole current staff and do not block admin orders without staff', async () => {
   const api = loadApi();
   const alice = await api.call('saveEmployee', { employee: { name: 'Alice', active: true } });
@@ -394,6 +455,26 @@ test('store forwards special item assignment to cloud with a normalized table id
 });
 
 for (const mode of ['cloud', 'local']) {
+  test(`${mode} prevents a game master from being bound to multiple active tables`, async () => {
+    const api = mode === 'cloud' ? loadApi() : null;
+    const local = mode === 'local' ? loadLocalStore() : null;
+    const store = local && local.store;
+    const saveEmployee = (name) => api
+      ? api.call('saveEmployee', { employee: { name, active: true } })
+      : store.saveEmployee({ name, active: true });
+    const bindTable = (tableId, staffIds) => api
+      ? api.call('updateTableStaff', { tableId, staffIds })
+      : store.saveTableStaff(tableId, staffIds);
+    const alice = await saveEmployee('Alice');
+    const bob = await saveEmployee('Bob');
+
+    await bindTable('T01', [alice.id]);
+    await assert.rejects(bindTable('T02', [alice.id, bob.id]), /Alice 已在 .*不能同时绑定到多张桌台/);
+    await bindTable('T01', [alice.id, bob.id]);
+  });
+}
+
+for (const mode of ['cloud', 'local']) {
   test(`${mode} customer special orders ignore attribution input with zero multiple and sole current staff`, async () => {
     const api = mode === 'cloud' ? loadApi() : null;
     const local = mode === 'local' ? loadLocalStore() : null;
@@ -495,7 +576,14 @@ for (const mode of ['cloud', 'local']) {
     assert.deepEqual(plain(assigned), {
       ...before,
       items: before.items.map((item, index) => index === 0
-        ? { ...item, commission: { ...item.commission, designatedStaffId: alice.id } }
+        ? {
+          ...item,
+          commission: {
+            ...item.commission,
+            designatedStaffId: alice.id,
+            designatedAllocations: [{ staffId: alice.id, quantity: 2 }]
+          }
+        }
         : item)
     });
     if (api) {
@@ -509,14 +597,29 @@ for (const mode of ['cloud', 'local']) {
     }
     const reassigned = await assign({ ...event, staffId: bob.id });
     assert.deepEqual(plain(reassigned.items[0].commission), {
-      ...before.items[0].commission, designatedStaffId: bob.id
+      ...before.items[0].commission,
+      designatedStaffId: bob.id,
+      designatedAllocations: [{ staffId: bob.id, quantity: 2 }]
     });
     assert.equal(reassigned.totalAmount, before.totalAmount);
     const bill = await detail();
     assert.equal(bill.commission.status, 'complete');
     assert.equal(bill.commission.allocations.find((entry) => entry.employeeId === bob.id).specialAmountCents, 17500);
+    const split = await assign({
+      ...event,
+      assignments: [{ staffId: alice.id, quantity: 1 }, { staffId: bob.id, quantity: 1 }]
+    });
+    assert.deepEqual(plain(split.items[0].commission), {
+      ...before.items[0].commission,
+      designatedStaffId: '',
+      designatedAllocations: [{ staffId: alice.id, quantity: 1 }, { staffId: bob.id, quantity: 1 }]
+    });
+    const splitBill = await detail();
+    assert.equal(splitBill.commission.specialItems.length, 2);
+    assert.equal(splitBill.commission.specialItems[0].quantity, 1);
+    assert.equal(splitBill.commission.specialItems[1].quantity, 1);
     if (api) api.operations.length = 0;
-    const settlement = await settle(bill);
+    const settlement = await settle(splitBill);
     assert.equal(settlement.commission.specialAmountCents, 17500);
     if (api) {
       assert.ok(api.operations.some((operation) =>

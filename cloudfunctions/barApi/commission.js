@@ -126,20 +126,91 @@ function distributeEvenly(amountCents, staffIds, employeesById, target, field) {
   });
 }
 
+function splitByQuantity(amountCents, quantities) {
+  if (!Number.isSafeInteger(amountCents) || amountCents < 0) throw new Error('提成金额数据无效');
+  if (!Array.isArray(quantities) || quantities.some((quantity) => !Number.isInteger(quantity) || quantity < 0)) {
+    throw new Error('特殊商品数量分配无效');
+  }
+  const totalQuantity = quantities.reduce((sum, quantity) => sum + quantity, 0);
+  if (!totalQuantity) return quantities.map(() => 0);
+  const basePerUnit = Math.floor(amountCents / totalQuantity);
+  let remainder = amountCents - (basePerUnit * totalQuantity);
+  return quantities.map((quantity) => {
+    const extra = Math.min(remainder, quantity);
+    remainder -= extra;
+    return (basePerUnit * quantity) + extra;
+  });
+}
+
+function normalizeDesignatedAssignments(assignments, totalQuantity) {
+  if (!Number.isInteger(totalQuantity) || totalQuantity < 1 || totalQuantity > 99) {
+    throw new Error('特殊商品数量必须为 1 至 99 的整数');
+  }
+  if (assignments === undefined || assignments === null) return [];
+  if (!Array.isArray(assignments)) throw new Error('特殊商品归属分配无效');
+  const grouped = new Map();
+  let assignedQuantity = 0;
+  assignments.forEach((entry) => {
+    if (!entry || typeof entry.staffId !== 'string' || !entry.staffId.trim() ||
+        !Number.isInteger(entry.quantity) || entry.quantity < 1) {
+      throw new Error('特殊商品归属分配无效');
+    }
+    const staffId = entry.staffId.trim();
+    assignedQuantity += entry.quantity;
+    grouped.set(staffId, (grouped.get(staffId) || 0) + entry.quantity);
+  });
+  if (assignedQuantity > totalQuantity) {
+    throw new Error('特殊商品归属数量超过商品数量');
+  }
+  return Array.from(grouped.entries()).map(([staffId, quantity]) => ({ staffId, quantity }));
+}
+
+function designatedAllocationsForItem(item, commission) {
+  if (!commission || commission.scope !== 'designated') return [];
+  const quantity = Number(item && item.quantity);
+  if (!Number.isInteger(quantity) || quantity < 1) throw new Error('特殊商品数量无效');
+  const savedAssignments = normalizeDesignatedAssignments(
+    commission.designatedAllocations,
+    quantity
+  );
+  const fallbackAssignments = savedAssignments.length
+    ? savedAssignments
+    : (commission.designatedStaffId
+      ? [{ staffId: commission.designatedStaffId, quantity }]
+      : []);
+  const allocatedAmounts = splitByQuantity(commission.amountCents, fallbackAssignments.map((entry) => entry.quantity));
+  return fallbackAssignments.map((entry, index) => ({
+    designatedStaffId: entry.staffId,
+    quantity: entry.quantity,
+    amountCents: allocatedAmounts[index]
+  }));
+}
+
 function readOrderItemCommission(item) {
   if (!item || !item.commission) {
     return itemCommission({ price: item.price }, item.quantity);
   }
   const scope = item.commission.scope || (item.commission.kind === 'special' ? 'designated' : 'shared');
-  return {
+  const result = {
     version: item.commission.version || 1,
     scope,
     rateBps: checkRate(item.commission.rateBps === undefined ? defaultRateBps : item.commission.rateBps),
     amountCents: Number.isSafeInteger(item.commission.amountCents)
       ? item.commission.amountCents
       : calculate(cents(item.price) * item.quantity, item.commission.rateBps === undefined ? defaultRateBps : item.commission.rateBps),
-    designatedStaffId: item.commission.designatedStaffId || ''
+    designatedStaffId: item.commission.designatedStaffId || '',
+    designatedAllocations: item.commission.designatedAllocations
   };
+  if (scope === 'designated') {
+    result.designatedAllocations = designatedAllocationsForItem(item, result);
+    if (result.designatedAllocations.length === 1 &&
+        result.designatedAllocations[0].quantity === item.quantity) {
+      result.designatedStaffId = result.designatedAllocations[0].designatedStaffId;
+    } else if (result.designatedAllocations.length !== 1) {
+      result.designatedStaffId = '';
+    }
+  }
+  return result;
 }
 
 function chargeableHours(elapsedMs) {
@@ -290,23 +361,40 @@ function summarizeCommission(session, orders, details, employeesById = {}) {
       };
       if (commission.scope === 'designated') {
         specialAmountCents += commission.amountCents;
-        if (!commission.designatedStaffId) {
-          unassignedItems.push(line);
-          return;
-        }
-        const record = ensureAllocation(allocationMap, order, commission.designatedStaffId,
-          employeesById[commission.designatedStaffId] && employeesById[commission.designatedStaffId].name);
-        record.specialAmountCents += commission.amountCents;
-        record.amountCents += commission.amountCents;
-        record.specialItems.push({
-          orderId: order.id,
-          productId: item.productId,
-          name: item.name,
-          quantity: item.quantity,
-          amountCents: commission.amountCents,
-          rateBps: commission.rateBps
+        const designatedAllocations = Array.isArray(commission.designatedAllocations)
+          ? commission.designatedAllocations
+          : [];
+        let assignedQuantity = 0;
+        let assignedAmountCents = 0;
+        designatedAllocations.forEach((allocation) => {
+          assignedQuantity += allocation.quantity;
+          assignedAmountCents += allocation.amountCents;
+          const record = ensureAllocation(allocationMap, order, allocation.designatedStaffId,
+            employeesById[allocation.designatedStaffId] && employeesById[allocation.designatedStaffId].name);
+          record.specialAmountCents += allocation.amountCents;
+          record.amountCents += allocation.amountCents;
+          record.specialItems.push({
+            orderId: order.id,
+            productId: item.productId,
+            name: item.name,
+            quantity: allocation.quantity,
+            amountCents: allocation.amountCents,
+            rateBps: commission.rateBps
+          });
+          specialItems.push({
+            ...line,
+            quantity: allocation.quantity,
+            amountCents: allocation.amountCents,
+            designatedStaffId: allocation.designatedStaffId
+          });
         });
-        specialItems.push({ ...line, designatedStaffId: commission.designatedStaffId });
+        if (assignedQuantity < item.quantity) {
+          unassignedItems.push({
+            ...line,
+            quantity: item.quantity - assignedQuantity,
+            amountCents: commission.amountCents - assignedAmountCents
+          });
+        }
         return;
       }
       goodsSharedAmountCents += commission.amountCents;
@@ -399,6 +487,7 @@ module.exports = {
   normalizeProductCommission,
   itemCommission,
   orderCommission,
+  normalizeDesignatedAssignments,
   calculateServiceFeeCents,
   summarizeSession,
   summarizeCommission,

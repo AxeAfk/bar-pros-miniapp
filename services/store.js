@@ -47,6 +47,27 @@ function getSessionOrders(sessionId) {
     .sort((first, second) => first.createdAt - second.createdAt);
 }
 
+function decorateOrderItemCommission(item, employeesById) {
+  if (!item || !item.commission) return item;
+  const commission = { ...item.commission };
+  if (commission.designatedStaffId) {
+    commission.designatedStaffName = employeesById[commission.designatedStaffId]
+      ? employeesById[commission.designatedStaffId].name
+      : commission.designatedStaffId;
+  }
+  if (Array.isArray(commission.designatedAllocations)) {
+    commission.designatedAllocations = commission.designatedAllocations.map((entry) => ({
+      ...entry,
+      designatedStaffName: employeesById[entry.staffId]
+        ? employeesById[entry.staffId].name
+        : employeesById[entry.designatedStaffId]
+          ? employeesById[entry.designatedStaffId].name
+          : entry.staffId || entry.designatedStaffId || ''
+    }));
+  }
+  return { ...item, commission };
+}
+
 function getEmployeeDirectory() {
   return Object.fromEntries(read(KEYS.employees, []).map((employee) => [employee.id, employee]));
 }
@@ -89,17 +110,7 @@ function getSessionSummary(session) {
   const employeesById = getEmployeeDirectory();
   const decoratedOrders = orders.map((order) => ({
     ...order,
-    items: order.items.map((item) => item.commission && item.commission.designatedStaffId
-      ? {
-        ...item,
-        commission: {
-          ...item.commission,
-          designatedStaffName: employeesById[item.commission.designatedStaffId]
-            ? employeesById[item.commission.designatedStaffId].name
-            : item.commission.designatedStaffId
-        }
-      }
-      : item)
+    items: order.items.map((item) => decorateOrderItemCommission(item, employeesById))
   }));
   return {
     ...session,
@@ -223,6 +234,51 @@ function getLocalAdminInvites() {
   return read(KEYS.adminInvites, []);
 }
 
+function decorateEmployeesWithCurrentTable(employees, activeSessions) {
+  const occupancyByEmployeeId = {};
+  Object.keys(activeSessions || {}).forEach((tableId) => {
+    const session = activeSessions[tableId];
+    commissionRules.normalizeStaffIds(Array.isArray(session && session.currentStaffIds)
+      ? session.currentStaffIds
+      : []).forEach((employeeId) => {
+      occupancyByEmployeeId[employeeId] = {
+        currentTableId: session.tableId || tableId,
+        currentTableName: session.tableName || tableId
+      };
+    });
+  });
+  return (employees || []).map((employee) => ({
+    ...employee,
+    ...(occupancyByEmployeeId[employee.id] || { currentTableId: '', currentTableName: '' })
+  }));
+}
+
+function findStaffingConflict(currentTableId, staffIds, activeSessions, employeesById) {
+  const conflictingSession = Object.keys(activeSessions).find((tableId) => {
+    if (tableId === currentTableId) return false;
+    const session = activeSessions[tableId];
+    const currentStaffIds = commissionRules.normalizeStaffIds(Array.isArray(session && session.currentStaffIds)
+      ? session.currentStaffIds
+      : []);
+    return staffIds.some((staffId) => currentStaffIds.includes(staffId));
+  });
+  if (!conflictingSession) return null;
+  const session = activeSessions[conflictingSession];
+  const occupiedStaffId = staffIds.find((staffId) => {
+    const currentStaffIds = commissionRules.normalizeStaffIds(Array.isArray(session.currentStaffIds)
+      ? session.currentStaffIds
+      : []);
+    return currentStaffIds.includes(staffId);
+  });
+  if (!occupiedStaffId) return null;
+  const employee = employeesById[occupiedStaffId];
+  return {
+    employeeId: occupiedStaffId,
+    employeeName: employee ? employee.name : occupiedStaffId,
+    tableName: session.tableName || conflictingSession
+  };
+}
+
 function updateTableStaff(tableId, staffIds) {
   const normalizedTableId = normalizeTableId(tableId);
   const table = getTableById(normalizedTableId);
@@ -240,8 +296,11 @@ function updateTableStaff(tableId, staffIds) {
       throw new Error('请选择有效且在职的游戏师');
     }
   });
-
   const activeSessions = getActiveSessions();
+  const conflict = findStaffingConflict(normalizedTableId, normalizedStaffIds, activeSessions, directory);
+  if (conflict) {
+    throw new Error(`${conflict.employeeName} 已在 ${conflict.tableName} 在台，不能同时绑定到多张桌台`);
+  }
   const now = Date.now();
   const existing = activeSessions[normalizedTableId];
   const session = existing || createSessionRecord(table, now, normalizedStaffIds);
@@ -449,10 +508,10 @@ function settleTable(tableId, expected) {
     : Promise.resolve().then(() => closeTable(tableId, expected));
 }
 
-function assignSpecialItem({ tableId, sessionId, orderId, itemIndex, staffId }) {
+function assignSpecialItem({ tableId, sessionId, orderId, itemIndex, staffId, assignments }) {
   const normalizedTableId = normalizeTableId(tableId);
   if (storageMode === 'cloud') {
-    return callCloud('assignSpecialItem', { tableId: normalizedTableId, sessionId, orderId, itemIndex, staffId });
+    return callCloud('assignSpecialItem', { tableId: normalizedTableId, sessionId, orderId, itemIndex, staffId, assignments });
   }
   return Promise.resolve().then(() => {
     if (!tables.some((table) => table.id === normalizedTableId)) throw new Error('桌号无效');
@@ -474,15 +533,36 @@ function assignSpecialItem({ tableId, sessionId, orderId, itemIndex, staffId }) 
     if (!item || !item.commission || item.commission.scope !== 'designated') {
       throw new Error('请选择有效的特殊商品');
     }
-    const normalizedStaffId = typeof staffId === 'string' ? staffId.trim() : '';
-    const employee = getEmployeeDirectory()[normalizedStaffId];
-    if (!(session.currentStaffIds || []).includes(normalizedStaffId) || !employee || !employee.active) {
+    const normalizedAssignments = assignments !== undefined
+      ? commissionRules.normalizeDesignatedAssignments(assignments, item.quantity)
+      : commissionRules.normalizeDesignatedAssignments(
+        typeof staffId === 'string' && staffId.trim() ? [{ staffId: staffId.trim(), quantity: item.quantity }] : [],
+        item.quantity
+      );
+    if (!normalizedAssignments.length) {
       throw new Error('请选择当前在台且在职的游戏师');
     }
+    const employeesById = getEmployeeDirectory();
+    normalizedAssignments.forEach((entry) => {
+      const employee = employeesById[entry.staffId];
+      if (!(session.currentStaffIds || []).includes(entry.staffId) || !employee || !employee.active) {
+        throw new Error('请选择当前在台且在职的游戏师');
+      }
+    });
+    const designatedStaffId = normalizedAssignments.length === 1 && normalizedAssignments[0].quantity === item.quantity
+      ? normalizedAssignments[0].staffId
+      : '';
     const saved = {
       ...order,
       items: order.items.map((entry, index) => index === itemIndex
-        ? { ...entry, commission: { ...entry.commission, designatedStaffId: normalizedStaffId } }
+        ? {
+          ...entry,
+          commission: {
+            ...entry.commission,
+            designatedStaffId,
+            designatedAllocations: normalizedAssignments
+          }
+        }
         : entry)
     };
     write(KEYS.orders, orders.map((entry) => entry.id === orderId ? saved : entry));
@@ -548,7 +628,9 @@ function removeAdminMember(openid) {
 }
 
 function listEmployees() {
-  return storageMode === 'cloud' ? callCloud('listEmployees') : Promise.resolve(read(KEYS.employees, []));
+  return storageMode === 'cloud'
+    ? callCloud('listEmployees')
+    : Promise.resolve(decorateEmployeesWithCurrentTable(read(KEYS.employees, []), getActiveSessions()));
 }
 
 function saveEmployee(employee) {

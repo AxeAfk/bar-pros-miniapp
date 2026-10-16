@@ -178,6 +178,30 @@ async function getEmployeesByIds(employeeIds, transaction) {
   return Object.fromEntries(employees.map((employee) => [employee.id, employee]));
 }
 
+function findStaffingConflict(currentTableId, staffIds, sessions, employeesById) {
+  const session = (sessions || []).find((entry) => {
+    if (!entry || entry.tableId === currentTableId) return false;
+    const currentStaffIds = commissionRules.normalizeStaffIds(Array.isArray(entry.currentStaffIds)
+      ? entry.currentStaffIds
+      : []);
+    return staffIds.some((staffId) => currentStaffIds.includes(staffId));
+  });
+  if (!session) return null;
+  const occupiedStaffId = staffIds.find((staffId) => {
+    const currentStaffIds = commissionRules.normalizeStaffIds(Array.isArray(session.currentStaffIds)
+      ? session.currentStaffIds
+      : []);
+    return currentStaffIds.includes(staffId);
+  });
+  if (!occupiedStaffId) return null;
+  const employee = employeesById[occupiedStaffId];
+  return {
+    employeeId: occupiedStaffId,
+    employeeName: employee ? employee.name : occupiedStaffId,
+    tableName: session.tableName || currentTableId
+  };
+}
+
 function collectSessionEmployeeIds(session, orders) {
   const ids = [];
   const seen = new Set();
@@ -191,25 +215,41 @@ function collectSessionEmployeeIds(session, orders) {
     (Array.isArray(segment.staffIds) ? segment.staffIds : []).forEach(append);
   });
   (orders || []).forEach((order) => {
-    (order.items || []).forEach((item) => append(item.commission && item.commission.designatedStaffId));
+    (order.items || []).forEach((item) => {
+      append(item.commission && item.commission.designatedStaffId);
+      (item && item.commission && Array.isArray(item.commission.designatedAllocations)
+        ? item.commission.designatedAllocations
+        : []).forEach((entry) => append(entry.staffId || entry.designatedStaffId));
+    });
   });
   return ids;
+}
+
+function decorateOrderItemCommission(item, employeesById) {
+  if (!item || !item.commission) return item;
+  const commission = { ...item.commission };
+  if (commission.designatedStaffId) {
+    commission.designatedStaffName = employeesById[commission.designatedStaffId]
+      ? employeesById[commission.designatedStaffId].name
+      : commission.designatedStaffId;
+  }
+  if (Array.isArray(commission.designatedAllocations)) {
+    commission.designatedAllocations = commission.designatedAllocations.map((entry) => ({
+      ...entry,
+      designatedStaffName: employeesById[entry.staffId]
+        ? employeesById[entry.staffId].name
+        : employeesById[entry.designatedStaffId]
+          ? employeesById[entry.designatedStaffId].name
+          : entry.staffId || entry.designatedStaffId || ''
+    }));
+  }
+  return { ...item, commission };
 }
 
 function decorateAdminOrders(orders, employeesById) {
   return orders.map((order) => ({
     ...order,
-    items: order.items.map((item) => item.commission && item.commission.designatedStaffId
-      ? {
-        ...item,
-        commission: {
-          ...item.commission,
-          designatedStaffName: employeesById[item.commission.designatedStaffId]
-            ? employeesById[item.commission.designatedStaffId].name
-            : item.commission.designatedStaffId
-        }
-      }
-      : item)
+    items: order.items.map((item) => decorateOrderItemCommission(item, employeesById))
   }));
 }
 
@@ -394,10 +434,15 @@ async function getDashboard(openid) {
     db.collection('bar_orders').orderBy('createdAt', 'desc').limit(10).get(),
     db.collection('bar_settlements').orderBy('closedAt', 'desc').limit(10).get()
   ]);
+  const sessionOrders = await Promise.all(sessionResult.data.map(async (session) => ({
+    sessionId: session.id,
+    orders: await getSessionOrders(session.id)
+  })));
+  const sessionOrdersById = new Map(sessionOrders.map((entry) => [entry.sessionId, entry.orders]));
   const sessionByTable = new Map(sessionResult.data.map((session) => [session.tableId, session]));
   const tablesWithSummary = storedTables.map((table) => {
     const session = sessionByTable.get(table.id);
-    const summary = summarizeSession(session);
+    const summary = summarizeSession(session, session ? sessionOrdersById.get(session.id) || [] : []);
     return {
       ...table,
       status: summary ? 'using' : 'idle',
@@ -554,6 +599,11 @@ async function updateTableStaff(tableId, staffIds, openid) {
         throw new Error('请选择有效且在职的游戏师');
       }
     });
+    const sessionsResult = await transaction.collection('bar_sessions').limit(100).get();
+    const conflict = findStaffingConflict(normalizedId, normalizedStaffIds, sessionsResult.data, employeesById);
+    if (conflict) {
+      throw new Error(`${conflict.employeeName} 已在 ${conflict.tableName} 在台，不能同时绑定到多张桌台`);
+    }
     const sessionResult = await transaction.collection('bar_sessions')
       .where({ tableId: normalizedId })
       .limit(1)
@@ -600,7 +650,6 @@ async function assignSpecialItem(event, openid) {
       !Number.isSafeInteger(event.itemIndex) || event.itemIndex < 0) {
     throw new Error('特殊商品归属参数无效');
   }
-  const staffId = typeof event.staffId === 'string' ? event.staffId.trim() : '';
   return db.runTransaction(async (transaction) => {
     const session = await getOptionalDocument('bar_sessions', tableId, transaction);
     if (!session || session.id !== event.sessionId || session.tableId !== tableId) {
@@ -614,12 +663,37 @@ async function assignSpecialItem(event, openid) {
     if (!item || !item.commission || item.commission.scope !== 'designated') {
       throw new Error('请选择有效的特殊商品');
     }
-    const employee = staffId ? await getOptionalDocument('bar_employees', staffId, transaction) : null;
-    if (!(session.currentStaffIds || []).includes(staffId) || !employee || !employee.active) {
+    const normalizedAssignments = event.assignments !== undefined
+      ? commissionRules.normalizeDesignatedAssignments(event.assignments, item.quantity)
+      : commissionRules.normalizeDesignatedAssignments(
+        typeof event.staffId === 'string' && event.staffId.trim()
+          ? [{ staffId: event.staffId.trim(), quantity: item.quantity }]
+          : [],
+        item.quantity
+      );
+    if (!normalizedAssignments.length) {
       throw new Error('请选择当前在台且在职的游戏师');
     }
+    const staffIds = normalizedAssignments.map((entry) => entry.staffId);
+    const employeesById = await getEmployeesByIds(staffIds, transaction);
+    normalizedAssignments.forEach((entry) => {
+      if (!(session.currentStaffIds || []).includes(entry.staffId) ||
+          !employeesById[entry.staffId] || !employeesById[entry.staffId].active) {
+        throw new Error('请选择当前在台且在职的游戏师');
+      }
+    });
+    const designatedStaffId = normalizedAssignments.length === 1 && normalizedAssignments[0].quantity === item.quantity
+      ? normalizedAssignments[0].staffId
+      : '';
     const items = order.items.map((entry, index) => index === event.itemIndex
-      ? { ...entry, commission: { ...entry.commission, designatedStaffId: staffId } }
+      ? {
+        ...entry,
+        commission: {
+          ...entry.commission,
+          designatedStaffId,
+          designatedAllocations: normalizedAssignments
+        }
+      }
       : entry);
     // Share a write conflict with settlement and staff changes, even when totals do not change.
     const { _id, ...sessionData } = session;
@@ -823,12 +897,31 @@ async function removeAdminMember(targetOpenid, openid) {
 
 async function listEmployees(openid) {
   await assertAdmin(openid);
-  return (await listOptionalCollectionDocuments('bar_employees'))
+  const [employees, sessions] = await Promise.all([
+    listOptionalCollectionDocuments('bar_employees'),
+    listOptionalCollectionDocuments('bar_sessions')
+  ]);
+  const occupancyByEmployeeId = {};
+  sessions.forEach((session) => {
+    commissionRules.normalizeStaffIds(Array.isArray(session && session.currentStaffIds)
+      ? session.currentStaffIds
+      : []).forEach((employeeId) => {
+      occupancyByEmployeeId[employeeId] = {
+        currentTableId: session.tableId || '',
+        currentTableName: session.tableName || session.tableId || ''
+      };
+    });
+  });
+  return employees
     .sort((first, second) => {
       const createdAtDelta = Number(first.createdAt || 0) - Number(second.createdAt || 0);
       if (createdAtDelta) return createdAtDelta;
       return String(first.id || '').localeCompare(String(second.id || ''));
-    });
+    })
+    .map((employee) => ({
+      ...employee,
+      ...(occupancyByEmployeeId[employee.id] || { currentTableId: '', currentTableName: '' })
+    }));
 }
 
 async function saveEmployee(input, openid) {

@@ -66,9 +66,21 @@ function itemCommissionText(item) {
     return '提成待核算';
   }
   const prefix = item.commission.scope === 'designated' ? '指定提成' : '均分提成';
-  const owner = item.commission.scope === 'designated'
-    ? ` · ${item.commission.designatedStaffName || item.commission.designatedStaffId || '待指定'}`
-    : '';
+  let owner = '';
+  if (item.commission.scope === 'designated') {
+    const allocations = Array.isArray(item.commission.designatedAllocations)
+      ? item.commission.designatedAllocations
+      : [];
+    if (allocations.length) {
+      const names = allocations.map((entry) => `${entry.designatedStaffName || entry.designatedStaffId || entry.staffId} × ${entry.quantity}`);
+      const assignedQuantity = allocations.reduce((sum, entry) => sum + entry.quantity, 0);
+      const pendingQuantity = Math.max(0, (item.quantity || 0) - assignedQuantity);
+      if (pendingQuantity > 0) names.push(`待指定 × ${pendingQuantity}`);
+      owner = ` · ${names.join('、')}`;
+    } else {
+      owner = ` · ${item.commission.designatedStaffName || item.commission.designatedStaffId || '待指定'}`;
+    }
+  }
   return `${prefix} ${item.commission.rateBps / 100}%${owner} · ${formatMoney(item.commission.amountCents / 100)}`;
 }
 

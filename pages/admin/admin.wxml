@@ -29,7 +29,7 @@
         <view wx:if="{{item.status === 'using'}}" class="table-summary">
           <view>已消费 {{item.elapsedText}}</view>
           <view>时长费 {{item.serviceFeeText}}</view>
-          <view class="price">{{item.totalText}}</view>
+          <view class="price">合计（含点单） {{item.totalText}}</view>
         </view>
         <view wx:else class="subtitle">点击查看 / 管理</view>
         <view class="table-actions">
@@ -54,6 +54,27 @@
     <view class="detail-line"><text>时长服务费（动态计时）</text><text>{{tableDetail.serviceFeeText}}</text></view>
     <view class="detail-line"><text>预计游戏师提成</text><text>{{tableDetail.commissionView.amountText}}</text></view>
     <view wx:if="{{tableDetail.commissionView.warning}}" class="subtitle danger">{{tableDetail.commissionView.warning}}</view>
+    <view wx:if="{{tableDetail.specialAssignmentSummary.hasSpecialItems}}" class="special-assignment-section">
+      <view class="row">
+        <text class="section-subtitle">特殊商品归属</text>
+        <text class="subtitle">共 {{tableDetail.specialAssignmentSummary.totalItemCount}} 件</text>
+      </view>
+      <view class="subtitle">已指定 {{tableDetail.specialAssignmentSummary.assignedItemCount}} 件 · 待指定 {{tableDetail.specialAssignmentSummary.unassignedItemCount}} 件</view>
+      <view wx:for="{{tableDetail.specialAssignmentSummary.groups}}" wx:key="groupKey" class="allocation-card">
+        <view class="row">
+          <text>{{item.employeeName}}</text>
+          <text>{{item.itemCount}} 件 · {{item.amountText}}</text>
+        </view>
+        <view class="subtitle">合计数量 {{item.quantityTotal}} 件</view>
+        <view wx:for="{{item.items}}" wx:key="entryKey" class="special-assignment-line">
+          <view>
+            <view>{{item.name}} × {{item.quantity}}</view>
+            <view class="subtitle">{{item.orderCreatedAtText}} · {{item.rateText}} · {{item.amountText}}</view>
+          </view>
+          <button size="mini" class="secondary-button special-action-btn" disabled="{{assignmentLoading || settling}}" data-table-id="{{tableDetail.tableId}}" data-session-id="{{tableDetail.id}}" data-order-id="{{item.orderId}}" data-item-index="{{item.itemIndex}}" bindtap="openSpecialAssignment">{{item.buttonText}}</button>
+        </view>
+      </view>
+    </view>
     <view wx:for="{{tableDetail.orders}}" wx:key="id" class="order-detail">
       <view class="row">
         <text>{{item.createdAtText}} · {{item.source === 'admin' ? '管理员代点' : '顾客下单'}}</text>
@@ -100,6 +121,27 @@
         </view>
         <view class="detail-line"><text>商品合计</text><text>{{checkoutBill.itemTotalText}}</text></view>
         <view class="detail-line"><text>时长费（动态计时）</text><text>{{checkoutBill.serviceFeeText}}</text></view>
+        <view wx:if="{{checkoutBill.specialAssignmentSummary.hasSpecialItems}}" class="special-assignment-section">
+          <view class="row">
+            <text class="section-subtitle">特殊商品归属</text>
+            <text class="subtitle">共 {{checkoutBill.specialAssignmentSummary.totalItemCount}} 件</text>
+          </view>
+          <view class="subtitle">已指定 {{checkoutBill.specialAssignmentSummary.assignedItemCount}} 件 · 待指定 {{checkoutBill.specialAssignmentSummary.unassignedItemCount}} 件</view>
+          <view wx:for="{{checkoutBill.specialAssignmentSummary.groups}}" wx:key="groupKey" class="allocation-card">
+            <view class="row">
+              <text>{{item.employeeName}}</text>
+              <text>{{item.itemCount}} 件 · {{item.amountText}}</text>
+            </view>
+            <view class="subtitle">合计数量 {{item.quantityTotal}} 件</view>
+            <view wx:for="{{item.items}}" wx:key="entryKey" class="special-assignment-line">
+              <view>
+                <view>{{item.name}} × {{item.quantity}}</view>
+                <view class="subtitle">{{item.orderCreatedAtText}} · {{item.rateText}} · {{item.amountText}}</view>
+              </view>
+              <button size="mini" class="secondary-button special-action-btn" disabled="{{assignmentLoading || settling}}" data-table-id="{{checkoutBill.tableId}}" data-session-id="{{checkoutBill.id}}" data-order-id="{{item.orderId}}" data-item-index="{{item.itemIndex}}" bindtap="openSpecialAssignment">{{item.buttonText}}</button>
+            </view>
+          </view>
+        </view>
         <button size="mini" class="secondary-button" bindtap="toggleCommission">{{showCommission ? '收起内部提成信息' : '游戏师提成预览（内部）'}}</button>
         <view wx:if="{{showCommission}}" class="commission-panel">
           <view class="detail-line"><text>本桌预计提成</text><text>{{checkoutBill.commissionView.amountText}}</text></view>
@@ -133,15 +175,15 @@
   <view wx:if="{{staffing}}" class="checkout-overlay" catchtouchmove="closeNothing">
     <view class="checkout-sheet">
       <view class="checkout-title">{{staffing.tableName}} · 绑定在台游戏师</view>
-      <view class="subtitle">保存后会按当前时间切换新的计时分段；已选项再次点击即可取消。</view>
+      <view class="subtitle">保存后会按当前时间切换新的计时分段；已选项再次点击即可取消，其他桌在台游戏师会置灰不可选。</view>
       <scroll-view scroll-y class="checkout-content">
         <view wx:if="{{!staffing.employees.length}}" class="subtitle danger">暂无在职游戏师，请先到游戏师管理里添加。</view>
-        <view wx:for="{{staffing.employees}}" wx:key="id" class="staff-option {{item.selected ? 'selected' : ''}}" data-id="{{item.id}}" bindtap="toggleStaffOption">
+        <view wx:for="{{staffing.employees}}" wx:key="id" class="staff-option {{item.selected ? 'selected' : ''}} {{item.unavailable ? 'unavailable' : ''}}" data-id="{{item.id}}" bindtap="toggleStaffOption">
           <view>
             <view class="staff-option-name">{{item.name}}</view>
             <view class="subtitle">{{item.selectedHint}}</view>
           </view>
-          <view class="staff-option-status {{item.selected ? 'selected' : ''}}">
+          <view class="staff-option-status {{item.selected ? 'selected' : ''}} {{item.unavailable ? 'unavailable' : ''}}">
             {{item.selectedText}}
           </view>
         </view>
@@ -158,17 +200,26 @@
   <view wx:if="{{specialAssignment}}" class="checkout-overlay" catchtouchmove="closeNothing">
     <view class="checkout-sheet">
       <view class="checkout-title">{{specialAssignment.tableName}} · 特殊商品归属</view>
-      <view class="subtitle">{{specialAssignment.productName}} · 请选择当前在台游戏师</view>
+      <view class="subtitle">{{specialAssignment.productName}} × {{specialAssignment.totalQuantity}} · {{specialAssignment.orderLabelText}}</view>
+      <view class="subtitle">当前归属：{{specialAssignment.currentOwnerText}}</view>
+      <view class="subtitle">待分配 {{specialAssignment.remainingQuantity}} 件 · 已分配 {{specialAssignment.assignedQuantity}} 件</view>
       <scroll-view scroll-y class="checkout-content">
         <view wx:if="{{!specialAssignment.employees.length}}" class="subtitle danger">请先在后台为此桌绑定游戏师，再指定商品归属。</view>
-        <view wx:for="{{specialAssignment.employees}}" wx:key="id" class="staff-option {{item.id === specialAssignment.selectedStaffId ? 'selected' : ''}}" data-id="{{item.id}}" bindtap="chooseSpecialOwner">
-          <view class="staff-option-name">{{item.name}}</view>
-          <view class="staff-option-status {{item.id === specialAssignment.selectedStaffId ? 'selected' : ''}}">{{item.id === specialAssignment.selectedStaffId ? '已选' : '未选'}}</view>
+        <view wx:for="{{specialAssignment.employees}}" wx:key="id" class="staff-option special-quantity-option {{item.assignedQuantity ? 'selected' : ''}}">
+          <view>
+            <view class="staff-option-name">{{item.name}}</view>
+            <view class="subtitle">已分配 {{item.quantityText}}</view>
+          </view>
+          <view class="quantity-stepper">
+            <button size="mini" class="secondary-button quantity-button" disabled="{{specialAssignment.saving || !item.canDecrease}}" data-id="{{item.id}}" data-action="decrease" bindtap="changeSpecialOwnerQuantity">-</button>
+            <view class="staff-option-status {{item.assignedQuantity ? 'selected' : ''}}">{{item.quantityText}}</view>
+            <button size="mini" class="secondary-button quantity-button" disabled="{{specialAssignment.saving || !item.canIncrease}}" data-id="{{item.id}}" data-action="increase" bindtap="changeSpecialOwnerQuantity">+</button>
+          </view>
         </view>
       </scroll-view>
       <view class="checkout-actions">
         <button size="mini" class="secondary-button" disabled="{{specialAssignment.saving}}" bindtap="closeSpecialAssignment">取消</button>
-        <button size="mini" class="primary-button" loading="{{specialAssignment.saving}}" disabled="{{specialAssignment.saving || !specialAssignment.selectedStaffId}}" bindtap="saveSpecialAssignment">保存归属</button>
+        <button size="mini" class="primary-button" loading="{{specialAssignment.saving}}" disabled="{{specialAssignment.saving || !specialAssignment.assignedQuantity}}" bindtap="saveSpecialAssignment">保存归属</button>
       </view>
     </view>
   </view>

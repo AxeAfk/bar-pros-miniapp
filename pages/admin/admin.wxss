@@ -223,12 +223,55 @@
   padding-top: 16rpx;
 }
 
+.special-assignment-section {
+  margin-top: 18rpx;
+}
+
+.section-subtitle {
+  font-size: 28rpx;
+  font-weight: 700;
+}
+
 .allocation-card {
   margin-top: 16rpx;
   padding: 16rpx;
   background: #101014;
   border-radius: 16rpx;
   border: 1rpx solid rgba(255, 255, 255, 0.06);
+}
+
+.special-assignment-line {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16rpx;
+  padding-top: 14rpx;
+}
+
+.special-action-btn {
+  width: 160rpx;
+  padding: 0;
+  margin: 0;
+  font-size: 22rpx;
+}
+
+.special-quantity-option {
+  align-items: center;
+}
+
+.quantity-stepper {
+  display: flex;
+  align-items: center;
+  gap: 12rpx;
+}
+
+.quantity-button {
+  width: 72rpx;
+  min-width: 72rpx;
+  padding: 0;
+  margin: 0;
+  font-size: 28rpx;
+  line-height: 64rpx;
 }
 
 .special-commission-line {
@@ -256,6 +299,15 @@
   color: #f6d18b;
   background: rgba(214, 163, 84, 0.12);
   border-radius: 10rpx;
+}
+
+.staff-option.unavailable {
+  opacity: 0.45;
+}
+
+.staff-option-status.unavailable {
+  color: #c8a870;
+  background: rgba(214, 163, 84, 0.12);
 }
 
 .staff-option {

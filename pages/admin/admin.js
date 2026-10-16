@@ -16,6 +16,175 @@ function formatOrder(order) {
   };
 }
 
+function specialAssignmentEntries(order, item, itemIndex, employeesById) {
+  if (!item || !item.commission || item.commission.scope !== 'designated') return [];
+  const allocations = Array.isArray(item.commission.designatedAllocations) && item.commission.designatedAllocations.length
+    ? item.commission.designatedAllocations.map((entry) => ({
+      designatedStaffId: entry.staffId || entry.designatedStaffId || '',
+      employeeName: entry.designatedStaffName ||
+        employeesById[entry.staffId || entry.designatedStaffId] ||
+        entry.staffId || entry.designatedStaffId || '',
+      quantity: entry.quantity,
+      amountCents: entry.amountCents
+    }))
+    : (item.commission.designatedStaffId
+      ? [{
+        designatedStaffId: item.commission.designatedStaffId,
+        employeeName: item.commission.designatedStaffName || employeesById[item.commission.designatedStaffId] || item.commission.designatedStaffId,
+        quantity: item.quantity,
+        amountCents: item.commission.amountCents
+      }]
+      : []);
+  const entries = allocations.map((entry) => ({
+    designatedStaffId: entry.designatedStaffId,
+    employeeName: entry.employeeName || entry.designatedStaffId || '待指定',
+    quantity: entry.quantity,
+    amountCents: entry.amountCents
+  }));
+  const assignedQuantity = allocations.reduce((sum, entry) => sum + entry.quantity, 0);
+  const assignedAmountCents = allocations.reduce((sum, entry) => sum + entry.amountCents, 0);
+  if (assignedQuantity < item.quantity) {
+    entries.push({
+      designatedStaffId: '',
+      employeeName: '待指定',
+      quantity: item.quantity - assignedQuantity,
+      amountCents: item.commission.amountCents - assignedAmountCents
+    });
+  }
+  return entries.map((entry, segmentIndex) => ({
+    entryKey: `${order.id || 'order'}-${itemIndex}-${segmentIndex}`,
+    orderId: order.id,
+    itemIndex,
+    orderCreatedAtText: order.createdAtText || '',
+    productId: item.productId,
+    name: item.name,
+    quantity: entry.quantity,
+    designatedStaffId: entry.designatedStaffId,
+    employeeName: entry.employeeName,
+    amountCents: entry.amountCents,
+    amountText: formatMoney(entry.amountCents / 100),
+    rateText: `${item.commission.rateBps / 100}%`,
+    buttonText: entry.designatedStaffId ? '修改归属' : '指定归属'
+  }));
+}
+
+function buildSpecialAssignmentSummary(summary) {
+  const employeesById = Object.fromEntries(((summary && summary.currentStaff) || []).map((entry) => [entry.id, entry.name]));
+  const groups = new Map();
+  let totalItemCount = 0;
+  let assignedItemCount = 0;
+  let unassignedItemCount = 0;
+  ((summary && summary.orders) || []).forEach((order) => {
+    (order.items || []).forEach((item, itemIndex) => {
+      if (!item || !item.commission || item.commission.scope !== 'designated') return;
+      specialAssignmentEntries(order, item, itemIndex, employeesById).forEach((entry) => {
+        totalItemCount += entry.quantity;
+        if (entry.designatedStaffId) {
+          assignedItemCount += entry.quantity;
+        } else {
+          unassignedItemCount += entry.quantity;
+        }
+        const groupKey = entry.designatedStaffId || '__unassigned__';
+        if (!groups.has(groupKey)) {
+          groups.set(groupKey, {
+            groupKey,
+            designatedStaffId: entry.designatedStaffId,
+            employeeName: entry.employeeName,
+            itemCount: 0,
+            quantityTotal: 0,
+            amountCents: 0,
+            items: []
+          });
+        }
+        const group = groups.get(groupKey);
+        group.itemCount += entry.quantity;
+        group.quantityTotal += entry.quantity;
+        group.amountCents += entry.amountCents;
+        group.items.push(entry);
+      });
+    });
+  });
+  return {
+    hasSpecialItems: totalItemCount > 0,
+    totalItemCount,
+    assignedItemCount,
+    unassignedItemCount,
+    groups: Array.from(groups.values()).map((group) => ({
+      ...group,
+      amountText: formatMoney(group.amountCents / 100)
+    }))
+  };
+}
+
+function buildSpecialAssignmentState(base, selectedQuantities, extra = {}) {
+  const normalized = {};
+  let assignedQuantity = 0;
+  (base.employees || []).forEach((employee) => {
+    const quantity = Math.max(0, Number(selectedQuantities && selectedQuantities[employee.id]) || 0);
+    normalized[employee.id] = quantity;
+    assignedQuantity += quantity;
+  });
+  const remainingQuantity = Math.max(0, base.totalQuantity - assignedQuantity);
+  return {
+    ...base,
+    ...extra,
+    selectedQuantities: normalized,
+    assignedQuantity,
+    remainingQuantity,
+    employees: (base.employees || []).map((employee) => ({
+      ...employee,
+      assignedQuantity: normalized[employee.id] || 0,
+      quantityText: `${normalized[employee.id] || 0} 件`,
+      canDecrease: (normalized[employee.id] || 0) > 0,
+      canIncrease: remainingQuantity > 0
+    }))
+  };
+}
+
+function specialOwnerText(item) {
+  if (!item || !item.commission) return '待指定';
+  const allocations = Array.isArray(item.commission.designatedAllocations)
+    ? item.commission.designatedAllocations
+    : [];
+  if (allocations.length) {
+    const names = allocations.map((entry) =>
+      `${entry.designatedStaffName || entry.staffId || entry.designatedStaffId} × ${entry.quantity}`);
+    const assignedQuantity = allocations.reduce((sum, entry) => sum + entry.quantity, 0);
+    const pendingQuantity = Math.max(0, (item.quantity || 0) - assignedQuantity);
+    if (pendingQuantity > 0) names.push(`待指定 × ${pendingQuantity}`);
+    return names.join('、');
+  }
+  return item.commission.designatedStaffName || item.commission.designatedStaffId || '待指定';
+}
+
+function initialSpecialQuantities(item, employees) {
+  const quantities = {};
+  (employees || []).forEach((employee) => {
+    quantities[employee.id] = 0;
+  });
+  const allocations = item && item.commission && Array.isArray(item.commission.designatedAllocations)
+    ? item.commission.designatedAllocations
+    : [];
+  if (allocations.length) {
+    allocations.forEach((entry) => {
+      const staffId = entry.staffId || entry.designatedStaffId;
+      if (staffId && quantities[staffId] !== undefined) {
+        quantities[staffId] += entry.quantity;
+      }
+    });
+    return quantities;
+  }
+  const ownerId = item && item.commission ? item.commission.designatedStaffId : '';
+  if (ownerId && quantities[ownerId] !== undefined) {
+    quantities[ownerId] = item.quantity;
+    return quantities;
+  }
+  if ((employees || []).length === 1) {
+    quantities[employees[0].id] = item.quantity;
+  }
+  return quantities;
+}
+
 function formatSummary(summary) {
   return {
     ...summary,
@@ -26,6 +195,7 @@ function formatSummary(summary) {
       ? summary.currentStaff.map((entry) => entry.name).join('、')
       : '未绑定',
     commissionView: commissionView(summary.commission),
+    specialAssignmentSummary: buildSpecialAssignmentSummary(summary),
     orders: summary.orders.map(formatOrder)
   };
 }
@@ -36,8 +206,17 @@ function buildStaffingState(staffing, selectedIds, extra = {}) {
   const employees = (staffing.employees || []).map((employee) => ({
     ...employee,
     selected: selectedSet.has(employee.id),
-    selectedText: selectedSet.has(employee.id) ? '已选' : '未选',
-    selectedHint: selectedSet.has(employee.id) ? '再次点击可取消绑定' : '点击选择绑定到当前桌台'
+    unavailable: Boolean(employee.currentTableId && employee.currentTableId !== staffing.tableId),
+    selectedText: selectedSet.has(employee.id)
+      ? '已选'
+      : employee.currentTableId && employee.currentTableId !== staffing.tableId
+        ? '占用中'
+        : '未选',
+    selectedHint: selectedSet.has(employee.id)
+      ? '再次点击可取消绑定'
+      : employee.currentTableId && employee.currentTableId !== staffing.tableId
+        ? `当前在 ${employee.currentTableName || employee.currentTableId}，需先从该桌下台`
+        : '点击选择绑定到当前桌台'
   }));
   return {
     ...staffing,
@@ -219,6 +398,15 @@ Page({
     const staffing = this.data.staffing;
     if (!staffing || staffing.saving) return;
     const employeeId = event.currentTarget.dataset.id;
+    const employee = staffing.employees.find((entry) => entry.id === employeeId);
+    if (!employee) return;
+    if (employee.unavailable) {
+      wx.showToast({
+        title: `${employee.name} 当前在 ${employee.currentTableName || employee.currentTableId}`,
+        icon: 'none'
+      });
+      return;
+    }
     const selected = staffing.selectedIds.includes(employeeId)
       ? staffing.selectedIds.filter((id) => id !== employeeId)
       : [...staffing.selectedIds, employeeId];
@@ -260,19 +448,19 @@ Page({
         throw new Error('特殊商品信息已变化，请刷新后重试');
       }
       const employees = summary.currentStaff || [];
-      const ownerId = item.commission.designatedStaffId;
-      const selectedStaffId = employees.some((entry) => entry.id === ownerId)
-        ? ownerId
-        : (employees.length === 1 ? employees[0].id : '');
-      this.setData({
-        specialAssignment: {
+      const baseAssignment = {
           tableId, sessionId, orderId, itemIndex: index,
           tableName: summary.tableName,
           productName: item.name,
+          totalQuantity: item.quantity,
+          orderCreatedAtText: order.createdAtText || '',
+          orderLabelText: order.createdAtText || '当前订单',
+          currentOwnerText: specialOwnerText(item),
           employees,
-          selectedStaffId,
           saving: false
-        }
+      };
+      this.setData({
+        specialAssignment: buildSpecialAssignmentState(baseAssignment, initialSpecialQuantities(item, employees))
       });
     } catch (error) {
       wx.showToast({ title: error.message || '商品归属读取失败', icon: 'none' });
@@ -281,12 +469,23 @@ Page({
     }
   },
 
-  chooseSpecialOwner(event) {
+  changeSpecialOwnerQuantity(event) {
     const assignment = this.data.specialAssignment;
     if (!assignment || assignment.saving) return;
     const staffId = event.currentTarget.dataset.id;
-    if (!assignment.employees.some((entry) => entry.id === staffId)) return;
-    this.setData({ specialAssignment: { ...assignment, selectedStaffId: staffId } });
+    const action = event.currentTarget.dataset.action;
+    const employee = assignment.employees.find((entry) => entry.id === staffId);
+    if (!employee) return;
+    const current = assignment.selectedQuantities[staffId] || 0;
+    const next = action === 'increase'
+      ? current + 1
+      : action === 'decrease'
+        ? current - 1
+        : current;
+    if (next < 0) return;
+    if (action === 'increase' && assignment.remainingQuantity < 1) return;
+    const selectedQuantities = { ...assignment.selectedQuantities, [staffId]: next };
+    this.setData({ specialAssignment: buildSpecialAssignmentState(assignment, selectedQuantities) });
   },
 
   closeSpecialAssignment() {
@@ -298,22 +497,25 @@ Page({
   async saveSpecialAssignment() {
     const assignment = this.data.specialAssignment;
     if (!assignment || assignment.saving) return;
-    if (!assignment.selectedStaffId) {
-      wx.showToast({ title: '请选择归属游戏师', icon: 'none' });
+    const assignments = Object.keys(assignment.selectedQuantities || {})
+      .filter((staffId) => (assignment.selectedQuantities[staffId] || 0) > 0)
+      .map((staffId) => ({ staffId, quantity: assignment.selectedQuantities[staffId] }));
+    if (!assignments.length) {
+      wx.showToast({ title: '请至少为 1 件商品指定归属游戏师', icon: 'none' });
       return;
     }
-    this.setData({ specialAssignment: { ...assignment, saving: true } });
+    this.setData({ specialAssignment: buildSpecialAssignmentState(assignment, assignment.selectedQuantities, { saving: true }) });
     try {
       await store.assignSpecialItem({
         tableId: assignment.tableId,
         sessionId: assignment.sessionId,
         orderId: assignment.orderId,
         itemIndex: assignment.itemIndex,
-        staffId: assignment.selectedStaffId
+        assignments
       });
     } catch (error) {
       wx.showToast({ title: error.message || '商品归属保存失败', icon: 'none' });
-      this.setData({ specialAssignment: { ...assignment, saving: false } });
+      this.setData({ specialAssignment: buildSpecialAssignmentState(assignment, assignment.selectedQuantities, { saving: false }) });
       return;
     }
     this.setData({ specialAssignment: null });

@@ -315,7 +315,17 @@ test('checkout previews auto-computed commission and blocks incomplete commissio
     getTableDetail: async () => ({
       id: 'S1', tableId: 'T01', tableName: '1号桌', itemTotal: 500, serviceFee: 99, totalAmount: 599,
       currentStaff: [{ id: 'A', name: 'Alice' }, { id: 'B', name: 'Bob' }],
-      orders: [],
+      orders: [{
+        id: 'O1',
+        createdAtText: '2026-10-16 14:20',
+        items: [{
+          productId: 'p019',
+          name: '香槟',
+          quantity: 1,
+          price: 500,
+          commission: { scope: 'designated', rateBps: 3000, amountCents: 10000, designatedStaffId: 'B', designatedStaffName: 'Bob' }
+        }]
+      }],
       commission: {
         status: 'pending_special_assignment',
         goodsAmountCents: 15000,
@@ -344,6 +354,9 @@ test('checkout previews auto-computed commission and blocks incomplete commissio
   assert.equal(page.data.checkoutBill.commissionView.specialItems[0].name, '香槟');
   assert.equal(page.data.checkoutBill.commissionView.specialItems[0].rateText, '30%');
   assert.equal(page.data.checkoutBill.commissionView.specialItems[0].amountText, '\u00a5100.00');
+  assert.equal(page.data.checkoutBill.specialAssignmentSummary.totalItemCount, 1);
+  assert.equal(page.data.checkoutBill.specialAssignmentSummary.groups[0].employeeName, 'Bob');
+  assert.equal(page.data.checkoutBill.specialAssignmentSummary.groups[0].itemCount, 1);
   await page.confirmPayment();
   assert.equal(settlements.length, 0);
   assert.equal(page.data.showCommission, true);
@@ -378,6 +391,33 @@ test('staffing sheet updates a table assignment', async () => {
   assert.equal(JSON.stringify(saved[0]), JSON.stringify({ tableId: 'T01', staffIds: ['A'] }));
   assert.ok(calls.some((entry) => entry.title === '游戏师绑定已更新'));
 
+});
+
+test('staffing sheet marks other-table game masters unavailable and blocks selecting them', async () => {
+  const saved = [];
+  const { page, calls } = loadPage('admin', {
+    listEmployees: async () => [
+      { id: 'A', name: 'Alice', active: true, currentTableId: 'T02', currentTableName: '2号桌' },
+      { id: 'B', name: 'Bob', active: true, currentTableId: '', currentTableName: '' }
+    ],
+    saveTableStaff: async (tableId, staffIds) => saved.push({ tableId, staffIds }),
+    getDashboard: async () => ({
+      stats: { orderCount: 0, revenue: 0 },
+      tables: [{ id: 'T01', name: '1号桌', status: 'idle', totalAmount: 0 }],
+      orders: [],
+      settlements: []
+    })
+  });
+  await page.refresh();
+  await page.openStaffing({ currentTarget: { dataset: { tableId: 'T01' } } });
+  assert.equal(page.data.staffing.employees[0].unavailable, true);
+  assert.match(page.data.staffing.employees[0].selectedHint, /2号桌/);
+  page.toggleStaffOption({ currentTarget: { dataset: { id: 'A' } } });
+  assert.equal(page.data.staffing.selectedIds.length, 0);
+  assert.ok(calls.some((entry) => entry.type === 'toast' && /2号桌/.test(entry.title)));
+  page.toggleStaffOption({ currentTarget: { dataset: { id: 'B' } } });
+  await page.saveStaffing();
+  assert.equal(JSON.stringify(saved[0]), JSON.stringify({ tableId: 'T01', staffIds: ['B'] }));
 });
 
 test('customer and admin menus submit special products without attribution controls or checks', async () => {
@@ -428,24 +468,51 @@ test('admin selects and saves special ownership for the exact order line and ref
     getTableDetail: async () => summary,
     assignSpecialItem: async (assignment) => {
       saved.push(assignment);
-      summary.orders[0].items[1].commission.designatedStaffId = assignment.staffId;
+      summary.orders[0].items[1].commission.designatedStaffId = assignment.assignments[0].staffId;
+      summary.orders[0].items[1].commission.designatedAllocations = assignment.assignments;
     }
   });
   page.data.selectedTableId = 'T01';
   page.data.checkoutBill = summary;
   await page.openSpecialAssignment(specialEvent);
-  assert.equal(page.data.specialAssignment.selectedStaffId, '');
+  assert.equal(page.data.specialAssignment.assignedQuantity, 0);
   await page.saveSpecialAssignment();
   assert.equal(saved.length, 0);
-  page.chooseSpecialOwner({ currentTarget: { dataset: { id: 'B' } } });
+  page.changeSpecialOwnerQuantity({ currentTarget: { dataset: { id: 'B', action: 'increase' } } });
   await page.saveSpecialAssignment();
   assert.equal(JSON.stringify(saved[0]), JSON.stringify({
-    tableId: 'T01', sessionId: 'S1', orderId: 'O1', itemIndex: 1, staffId: 'B'
+    tableId: 'T01', sessionId: 'S1', orderId: 'O1', itemIndex: 1, assignments: [{ staffId: 'B', quantity: 1 }]
   }));
   assert.equal(page.data.specialAssignment, null);
   assert.equal(page.data.checkoutBill.orders[0].items[1].commission.designatedStaffId, 'B');
   assert.equal(page.data.tableDetail.orders[0].items[0].commission.designatedStaffId, undefined);
   assert.ok(calls.some((entry) => entry.title === '特殊商品归属已更新'));
+});
+
+test('special item summary groups assignments by game master and includes modify entry', async () => {
+  const summary = specialSummary();
+  summary.orders[0].createdAtText = '2026-10-16 14:22';
+  summary.orders[0].items[0].commission.designatedStaffId = 'A';
+  summary.orders[0].items[0].commission.designatedStaffName = 'Alice';
+  summary.orders[0].items[1].commission.designatedStaffId = 'A';
+  summary.orders[0].items[1].commission.designatedStaffName = 'Alice';
+  const { page } = loadPage('admin', {
+    getDashboard: async () => ({
+      stats: { orderCount: 0, revenue: 1000 },
+      tables: [{ id: 'T01', name: '1号桌', status: 'using', totalAmount: 1000, itemTotal: 1000, serviceFee: 0 }],
+      orders: [],
+      settlements: []
+    }),
+    getTableDetail: async () => summary
+  });
+  page.data.selectedTableId = 'T01';
+  await page.refresh();
+  assert.equal(page.data.tableDetail.specialAssignmentSummary.totalItemCount, 2);
+  assert.equal(page.data.tableDetail.specialAssignmentSummary.groups[0].employeeName, 'Alice');
+  assert.equal(page.data.tableDetail.specialAssignmentSummary.groups[0].itemCount, 2);
+  assert.equal(page.data.tableDetail.specialAssignmentSummary.groups[0].items[0].buttonText, '修改归属');
+  assert.equal(page.data.tableDetail.specialAssignmentSummary.groups[0].items[0].orderId, 'O1');
+  assert.equal(page.data.tableDetail.specialAssignmentSummary.groups[0].items[0].entryKey, 'O1-0-0');
 });
 
 test('admin special ownership defaults sole staff, supports cancel and preserves input on failure', async () => {
@@ -454,9 +521,10 @@ test('admin special ownership defaults sole staff, supports cancel and preserves
     assignSpecialItem: async () => { throw new Error('游戏师已变更'); }
   });
   await page.openSpecialAssignment(specialEvent);
-  assert.equal(page.data.specialAssignment.selectedStaffId, 'A');
+  assert.equal(page.data.specialAssignment.selectedQuantities.A, 1);
+  assert.equal(page.data.specialAssignment.currentOwnerText, '待指定');
   await page.saveSpecialAssignment();
-  assert.equal(page.data.specialAssignment.selectedStaffId, 'A');
+  assert.equal(page.data.specialAssignment.selectedQuantities.A, 1);
   assert.equal(page.data.specialAssignment.saving, false);
   assert.ok(calls.some((entry) => entry.title === '游戏师已变更'));
   page.closeSpecialAssignment();
@@ -469,12 +537,41 @@ test('special ownership handles empty staff and stale sessions without saving', 
   await page.openSpecialAssignment(specialEvent);
   assert.equal(page.data.specialAssignment.employees.length, 0);
   await page.saveSpecialAssignment();
-  assert.ok(calls.some((entry) => entry.title === '请选择归属游戏师'));
+  assert.ok(calls.some((entry) => entry.title === '请至少为 1 件商品指定归属游戏师'));
   page.closeSpecialAssignment();
   summary.id = 'S2';
   await page.openSpecialAssignment(specialEvent);
   assert.equal(page.data.specialAssignment, null);
   assert.ok(calls.some((entry) => entry.title === '台次已变化，请刷新后重试'));
+});
+
+test('special ownership supports splitting one multi-quantity special item across game masters', async () => {
+  const summary = specialSummary();
+  summary.orders[0].items[1].quantity = 5;
+  summary.orders[0].items[1].commission.amountCents = 75000;
+  const saved = [];
+  const { page } = loadPage('admin', {
+    getTableDetail: async () => summary,
+    assignSpecialItem: async (assignment) => { saved.push(assignment); }
+  });
+  await page.openSpecialAssignment(specialEvent);
+  assert.equal(page.data.specialAssignment.remainingQuantity, 5);
+  page.changeSpecialOwnerQuantity({ currentTarget: { dataset: { id: 'A', action: 'increase' } } });
+  page.changeSpecialOwnerQuantity({ currentTarget: { dataset: { id: 'A', action: 'increase' } } });
+  page.changeSpecialOwnerQuantity({ currentTarget: { dataset: { id: 'A', action: 'increase' } } });
+  page.changeSpecialOwnerQuantity({ currentTarget: { dataset: { id: 'B', action: 'increase' } } });
+  page.changeSpecialOwnerQuantity({ currentTarget: { dataset: { id: 'B', action: 'increase' } } });
+  assert.equal(page.data.specialAssignment.selectedQuantities.A, 3);
+  assert.equal(page.data.specialAssignment.selectedQuantities.B, 2);
+  assert.equal(page.data.specialAssignment.remainingQuantity, 0);
+  await page.saveSpecialAssignment();
+  assert.equal(JSON.stringify(saved[0]), JSON.stringify({
+    tableId: 'T01',
+    sessionId: 'S1',
+    orderId: 'O1',
+    itemIndex: 1,
+    assignments: [{ staffId: 'A', quantity: 3 }, { staffId: 'B', quantity: 2 }]
+  }));
 });
 
 test('special ownership prevents duplicate writes and checkout while saving', async () => {
