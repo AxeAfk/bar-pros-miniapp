@@ -137,8 +137,9 @@ function loadApi(options = {}) {
   };
   let openid = 'admin';
   const qrRequests = [];
+  const operations = [];
   const getField = (document, field) => field.split('.').reduce((value, key) => value && value[key], document);
-  const collection = (name) => {
+  const collection = (name, transaction = false) => {
     let filter = null;
     const sort = [];
     let offset = 0;
@@ -149,6 +150,7 @@ function loadApi(options = {}) {
       skip(value) { offset = value; return this; },
       limit(value) { limit = value; return this; },
       async get() {
+        operations.push({ name, type: 'query', transaction });
         const rows = Object.values(documents[name]).filter((doc) => !filter || Object.entries(filter).every(([key, value]) => getField(doc, key) === value));
         rows.sort((a, b) => {
           for (const [field, direction] of sort) {
@@ -164,10 +166,22 @@ function loadApi(options = {}) {
       },
       doc(id) {
         return {
-          async get() { return { data: documents[name][id] ? plain(documents[name][id]) : null }; },
-          async set({ data }) { documents[name][id] = plain(data); },
-          async update({ data }) { Object.assign(documents[name][id], plain(data)); },
-          async remove() { delete documents[name][id]; }
+          async get() {
+            operations.push({ name, id, type: 'get', transaction });
+            return { data: documents[name][id] ? plain(documents[name][id]) : null };
+          },
+          async set({ data }) {
+            operations.push({ name, id, type: 'set', transaction });
+            documents[name][id] = plain(data);
+          },
+          async update({ data }) {
+            operations.push({ name, id, type: 'update', transaction });
+            Object.assign(documents[name][id], plain(data));
+          },
+          async remove() {
+            operations.push({ name, id, type: 'remove', transaction });
+            delete documents[name][id];
+          }
         };
       }
     };
@@ -178,7 +192,7 @@ function loadApi(options = {}) {
     collection,
     async runTransaction(callback) {
       const before = plain(documents);
-      try { return await callback({ collection }); }
+      try { return await callback({ collection: (name) => collection(name, true) }); }
       catch (error) { documents = before; throw error; }
     }
   };
@@ -228,20 +242,24 @@ function loadApi(options = {}) {
       return result.data;
     },
     qrRequests: () => qrRequests.slice(),
+    operations,
     documents: () => documents,
     setUser: (value) => { openid = value; }
   };
 }
 
-test('cloud flow binds staff enforces designated specials and snapshots settlement allocations', async () => {
+test('cloud flow assigns special items after ordering and snapshots settlement allocations', async () => {
   const api = loadApi();
   const alice = await api.call('saveEmployee', { employee: { name: 'Alice', active: true } });
   const bob = await api.call('saveEmployee', { employee: { name: 'Bob', active: true } });
   await api.call('updateTableStaff', { tableId: 'T01', staffIds: [alice.id, bob.id] });
-  await api.call('submitOrder', {
+  const order = await api.call('submitOrder', {
     tableId: 'T01',
     source: 'admin',
     items: [{ productId: 'p019', quantity: 1, designatedStaffId: bob.id }, { productId: 'p001', quantity: 2 }]
+  });
+  await api.call('assignSpecialItem', {
+    tableId: 'T01', sessionId: order.sessionId, orderId: order.id, itemIndex: 0, staffId: bob.id
   });
   const summary = await api.call('getTableDetail', { tableId: 'T01' });
   assert.equal(summary.currentStaff.length, 2);
@@ -264,7 +282,7 @@ test('cloud flow binds staff enforces designated specials and snapshots settleme
   assert.equal(paid.commission.payoutStatus, 'paid');
 });
 
-test('special goods require designated in admin mode and are auto-assigned when exactly one staff is on duty', async () => {
+test('special goods are auto-assigned to the sole current staff and do not block admin orders without staff', async () => {
   const api = loadApi();
   const alice = await api.call('saveEmployee', { employee: { name: 'Alice', active: true } });
   await api.call('updateTableStaff', { tableId: 'T01', staffIds: [alice.id] });
@@ -274,11 +292,12 @@ test('special goods require designated in admin mode and are auto-assigned when 
   assert.equal(summary.orders[0].items[0].commission.designatedStaffName, 'Alice');
 
   await api.call('updateTableStaff', { tableId: 'T01', staffIds: [alice.id] });
-  await assert.rejects(api.call('submitOrder', {
+  const unassignedOrder = await api.call('submitOrder', {
     tableId: 'T02',
     source: 'admin',
     items: [{ productId: 'p019', quantity: 1 }]
-  }), /需要指定/);
+  });
+  assert.equal(api.documents().bar_orders[unassignedOrder.id].items[0].commission.designatedStaffId, undefined);
 });
 
 test('owner can invite and remove backend members while members cannot manage peers', async () => {
@@ -324,20 +343,31 @@ test('invite generation fails when wxacode image cannot be generated', async () 
   await assert.rejects(api.call('createAdminInvite'), /release: .*trial: .*develop:/);
 });
 
-test('local mode keeps the same staffing and settlement rules', async () => {
+function loadLocalStore(mode = 'local') {
   const storage = new Map();
+  const cloudCalls = [];
   const filename = path.join(__dirname, '..', 'services', 'store.js');
   const context = {
     module: { exports: {} },
     wx: {
       getStorageSync: (key) => storage.has(key) ? structuredClone(storage.get(key)) : '',
-      setStorageSync: (key, value) => storage.set(key, structuredClone(value))
+      setStorageSync: (key, value) => storage.set(key, structuredClone(value)),
+      cloud: {
+        callFunction: async (request) => {
+          cloudCalls.push(request);
+          return { result: { success: true, data: { id: 'saved-order' } } };
+        }
+      }
     },
-    require: (id) => id === '../config/app' ? { ...require('../config/app'), storageMode: 'local' }
+    require: (id) => id === '../config/app' ? { ...require('../config/app'), storageMode: mode, cloudEnvId: 'test' }
       : require(path.resolve(path.dirname(filename), id))
   };
   vm.runInNewContext(fs.readFileSync(filename, 'utf8'), context);
-  const store = context.module.exports;
+  return { store: context.module.exports, storage, cloudCalls };
+}
+
+test('local mode keeps the same staffing and settlement rules', async () => {
+  const { store } = loadLocalStore();
   const employee = await store.saveEmployee({ name: 'Alice', active: true });
   await store.saveTableStaff('T01', [employee.id]);
   await store.submitOrder({ tableId: 'T01', source: 'admin', items: [{ productId: 'p019', quantity: 1, designatedStaffId: employee.id }] });
@@ -351,3 +381,151 @@ test('local mode keeps the same staffing and settlement rules', async () => {
   });
   assert.equal(settlement.commission.allocations[0].employeeName, 'Alice');
 });
+
+test('store forwards special item assignment to cloud with a normalized table id', async () => {
+  const { store, cloudCalls } = loadLocalStore('cloud');
+  const result = await store.assignSpecialItem({
+    tableId: '1', sessionId: 'S1', orderId: 'O1', itemIndex: 0, staffId: 'E1'
+  });
+  assert.equal(result.id, 'saved-order');
+  assert.deepEqual(plain(cloudCalls[0].data), {
+    action: 'assignSpecialItem', tableId: 'T01', sessionId: 'S1', orderId: 'O1', itemIndex: 0, staffId: 'E1'
+  });
+});
+
+for (const mode of ['cloud', 'local']) {
+  test(`${mode} customer special orders ignore attribution input with zero multiple and sole current staff`, async () => {
+    const api = mode === 'cloud' ? loadApi() : null;
+    const local = mode === 'local' ? loadLocalStore() : null;
+    const submit = (tableId, items) => api
+      ? api.call('submitOrder', { tableId, items })
+      : local.store.submitOrder({ tableId, items });
+    const staff = (ids) => api
+      ? api.call('updateTableStaff', { tableId: 'T01', staffIds: ids })
+      : local.store.saveTableStaff('T01', ids);
+    const employee = (name) => api
+      ? api.call('saveEmployee', { employee: { name, active: true } })
+      : local.store.saveEmployee({ name, active: true });
+    const detail = () => api ? api.call('getTableDetail', { tableId: 'T01' }) : local.store.getTableDetail('T01');
+    const alice = await employee('Alice');
+    const bob = await employee('Bob');
+    const orderAsCustomer = async (staffId) => {
+      if (api) api.setUser('customer');
+      const order = await submit('T01', [
+        { productId: 'p019', quantity: 1, designatedStaffId: staffId },
+        { productId: 'p001', quantity: 1, designatedStaffId: staffId }
+      ]);
+      assert.equal(order.items[0].commission, undefined);
+      assert.equal(order.items[1].commission, undefined);
+      if (api) api.setUser('admin');
+      const bill = await detail();
+      const saved = bill.orders.find((entry) => entry.id === order.id);
+      assert.equal(saved.items[1].commission.designatedStaffId, undefined);
+      return saved;
+    };
+    assert.equal((await orderAsCustomer('not-a-current-employee')).items[0].commission.designatedStaffId, undefined);
+    await staff([alice.id, bob.id]);
+    assert.equal((await orderAsCustomer(bob.id)).items[0].commission.designatedStaffId, undefined);
+    await staff([alice.id]);
+    assert.equal((await orderAsCustomer(bob.id)).items[0].commission.designatedStaffId, alice.id);
+  });
+
+  test(`${mode} assignment validates scope and ownership preserves snapshots and allows eventual settlement`, async () => {
+    const api = mode === 'cloud' ? loadApi() : null;
+    const local = mode === 'local' ? loadLocalStore() : null;
+    const store = local && local.store;
+    const employee = (name, active = true) => api
+      ? api.call('saveEmployee', { employee: { name, active } }) : store.saveEmployee({ name, active });
+    const detail = () => api ? api.call('getTableDetail', { tableId: 'T01' }) : store.getTableDetail('T01');
+    const submit = (tableId, items) => api ? api.call('submitOrder', { tableId, items }) : store.submitOrder({ tableId, items });
+    const assign = (event) => api ? api.call('assignSpecialItem', event) : store.assignSpecialItem(event);
+    const settle = (bill) => {
+      const expected = { sessionId: bill.id, totalAmount: bill.totalAmount, commissionAmountCents: bill.commission.amountCents };
+      return api ? api.call('settleTable', { tableId: 'T01', expected }) : store.settleTable('T01', expected);
+    };
+    const alice = await employee('Alice');
+    const bob = await employee('Bob');
+    const outsider = await employee('Outsider');
+    const inactive = await employee('Inactive', false);
+    if (api) {
+      await api.call('updateTableStaff', { tableId: 'T01', staffIds: [alice.id, bob.id] });
+    } else {
+      await store.saveTableStaff('T01', [alice.id, bob.id]);
+    }
+    const order = await submit('T01', [{ productId: 'p019', quantity: 2 }, { productId: 'p001', quantity: 1 }]);
+    const otherOrder = await submit('T02', [{ productId: 'p019', quantity: 1 }]);
+    const event = { tableId: 'T01', sessionId: order.sessionId, orderId: order.id, itemIndex: 0, staffId: alice.id };
+    const initial = await detail();
+    assert.equal(initial.commission.status, 'pending_special_assignment');
+    await assert.rejects(settle(initial), /未指定归属/);
+    if (api) {
+      api.setUser('customer');
+      await assert.rejects(assign(event), /未获管理员授权/);
+      api.setUser('admin');
+    }
+    for (const change of [
+      { tableId: 'T99' }, { sessionId: '' }, { sessionId: 'stale-session' },
+      { tableId: 'T02' }, { orderId: '' }, { orderId: 'missing-order' }, { orderId: otherOrder.id },
+      { itemIndex: -1 }, { itemIndex: 0.5 }, { itemIndex: '0' }, { itemIndex: Number.MAX_SAFE_INTEGER + 1 },
+      { itemIndex: 99 }, { itemIndex: 1 }, { staffId: '' }, { staffId: 'missing-staff' },
+      { staffId: outsider.id }, { staffId: inactive.id }
+    ]) {
+      await assert.rejects(assign({ ...event, ...change }));
+    }
+    // Also reject a current employee whose employment was disabled after binding.
+    if (api) {
+      api.documents().bar_employees[bob.id].active = false;
+    } else {
+      const employees = local.storage.get('bar_employees');
+      employees.find((entry) => entry.id === bob.id).active = false;
+    }
+    await assert.rejects(assign({ ...event, staffId: bob.id }), /在职/);
+    if (api) {
+      api.documents().bar_employees[bob.id].active = true;
+    } else {
+      local.storage.get('bar_employees').find((entry) => entry.id === bob.id).active = true;
+    }
+    // A historic rate different from today's catalog must survive assignment.
+    const savedOrder = api ? api.documents().bar_orders[order.id] : local.storage.get('bar_orders').find((entry) => entry.id === order.id);
+    savedOrder.items[0].commission.rateBps = 1750;
+    savedOrder.items[0].commission.amountCents = 17500;
+    const before = plain(savedOrder);
+    if (api) api.operations.length = 0;
+    const assigned = await assign({ ...event, tableId: '1', staffId: ` ${alice.id} ` });
+    assert.deepEqual(plain(assigned), {
+      ...before,
+      items: before.items.map((item, index) => index === 0
+        ? { ...item, commission: { ...item.commission, designatedStaffId: alice.id } }
+        : item)
+    });
+    if (api) {
+      for (const [name, id, type] of [
+        ['bar_sessions', 'T01', 'get'], ['bar_sessions', 'T01', 'set'],
+        ['bar_orders', order.id, 'get'], ['bar_orders', order.id, 'update']
+      ]) {
+        assert.ok(api.operations.some((operation) =>
+          operation.name === name && operation.id === id && operation.type === type && operation.transaction));
+      }
+    }
+    const reassigned = await assign({ ...event, staffId: bob.id });
+    assert.deepEqual(plain(reassigned.items[0].commission), {
+      ...before.items[0].commission, designatedStaffId: bob.id
+    });
+    assert.equal(reassigned.totalAmount, before.totalAmount);
+    const bill = await detail();
+    assert.equal(bill.commission.status, 'complete');
+    assert.equal(bill.commission.allocations.find((entry) => entry.employeeId === bob.id).specialAmountCents, 17500);
+    if (api) api.operations.length = 0;
+    const settlement = await settle(bill);
+    assert.equal(settlement.commission.specialAmountCents, 17500);
+    if (api) {
+      assert.ok(api.operations.some((operation) =>
+        operation.name === 'bar_orders' && operation.type === 'query' && operation.transaction));
+      assert.ok(api.operations.some((operation) =>
+        operation.name === 'bar_sessions' && operation.id === 'T01' && operation.type === 'remove' && operation.transaction));
+    }
+    await assert.rejects(assign(event), /已买单/);
+    await submit('T01', [{ productId: 'p001', quantity: 1 }]);
+    await assert.rejects(assign(event), /场次已变化/);
+  });
+}

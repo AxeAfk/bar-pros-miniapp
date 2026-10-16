@@ -59,10 +59,11 @@
         <text>{{item.createdAtText}} · {{item.source === 'admin' ? '管理员代点' : '顾客下单'}}</text>
         <text class="price">{{item.totalText}}</text>
       </view>
-      <view wx:for="{{item.items}}" wx:for-item="product" wx:key="productId" class="product-line">
+      <view wx:for="{{item.items}}" wx:for-item="product" wx:for-index="productIndex" wx:key="itemIndex" class="product-line">
         <view>
           <text>{{product.name}} × {{product.quantity}}（{{product.unitPriceText}} / 件）</text>
           <view class="subtitle {{product.commission && product.commission.scope === 'designated' ? 'special-item-commission' : ''}}">{{product.commissionText}}</view>
+          <button wx:if="{{product.commission && product.commission.scope === 'designated'}}" size="mini" class="secondary-button small-btn" disabled="{{assignmentLoading || settling}}" data-table-id="{{tableDetail.tableId}}" data-session-id="{{tableDetail.id}}" data-order-id="{{item.id}}" data-item-index="{{productIndex}}" bindtap="openSpecialAssignment">{{product.commission.designatedStaffId ? '修改特殊商品归属' : '指定特殊商品归属'}}</button>
         </view>
         <text>{{product.lineTotalText}}</text>
       </view>
@@ -88,10 +89,11 @@
         <view class="subtitle">当前在台游戏师：{{checkoutBill.currentStaffText}}</view>
         <view wx:for="{{checkoutBill.orders}}" wx:key="id" class="order-detail">
           <view class="subtitle">{{item.createdAtText}}</view>
-          <view wx:for="{{item.items}}" wx:for-item="product" wx:key="productId" class="product-line">
+          <view wx:for="{{item.items}}" wx:for-item="product" wx:for-index="productIndex" wx:key="itemIndex" class="product-line">
             <view>
               <text>{{product.name}} × {{product.quantity}}（{{product.unitPriceText}}）</text>
               <view class="subtitle {{product.commission && product.commission.scope === 'designated' ? 'special-item-commission' : ''}}">{{product.commissionText}}</view>
+              <button wx:if="{{showCommission && product.commission && product.commission.scope === 'designated'}}" size="mini" class="secondary-button small-btn" disabled="{{assignmentLoading || settling}}" data-table-id="{{checkoutBill.tableId}}" data-session-id="{{checkoutBill.id}}" data-order-id="{{item.id}}" data-item-index="{{productIndex}}" bindtap="openSpecialAssignment">{{product.commission.designatedStaffId ? '修改特殊商品归属' : '指定特殊商品归属'}}</button>
             </view>
             <text>{{product.lineTotalText}}</text>
           </view>
@@ -149,6 +151,24 @@
       <view class="checkout-actions">
         <button size="mini" class="secondary-button" disabled="{{staffing.saving}}" bindtap="closeStaffing">取消</button>
         <button size="mini" class="primary-button" loading="{{staffing.saving}}" disabled="{{staffing.saving}}" bindtap="saveStaffing">保存绑定</button>
+      </view>
+    </view>
+  </view>
+
+  <view wx:if="{{specialAssignment}}" class="checkout-overlay" catchtouchmove="closeNothing">
+    <view class="checkout-sheet">
+      <view class="checkout-title">{{specialAssignment.tableName}} · 特殊商品归属</view>
+      <view class="subtitle">{{specialAssignment.productName}} · 请选择当前在台游戏师</view>
+      <scroll-view scroll-y class="checkout-content">
+        <view wx:if="{{!specialAssignment.employees.length}}" class="subtitle danger">请先在后台为此桌绑定游戏师，再指定商品归属。</view>
+        <view wx:for="{{specialAssignment.employees}}" wx:key="id" class="staff-option {{item.id === specialAssignment.selectedStaffId ? 'selected' : ''}}" data-id="{{item.id}}" bindtap="chooseSpecialOwner">
+          <view class="staff-option-name">{{item.name}}</view>
+          <view class="staff-option-status {{item.id === specialAssignment.selectedStaffId ? 'selected' : ''}}">{{item.id === specialAssignment.selectedStaffId ? '已选' : '未选'}}</view>
+        </view>
+      </scroll-view>
+      <view class="checkout-actions">
+        <button size="mini" class="secondary-button" disabled="{{specialAssignment.saving}}" bindtap="closeSpecialAssignment">取消</button>
+        <button size="mini" class="primary-button" loading="{{specialAssignment.saving}}" disabled="{{specialAssignment.saving || !specialAssignment.selectedStaffId}}" bindtap="saveSpecialAssignment">保存归属</button>
       </view>
     </view>
   </view>

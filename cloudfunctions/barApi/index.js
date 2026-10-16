@@ -331,12 +331,12 @@ function publicOrder(order) {
   };
 }
 
-async function getSessionOrders(sessionId, admin = false) {
+async function getSessionOrders(sessionId, admin = false, transaction) {
   const orders = [];
   let offset = 0;
   let page = [];
   do {
-    const result = await db.collection('bar_orders')
+    const result = await (transaction || db).collection('bar_orders')
       .where({ sessionId })
       .orderBy('createdAt', 'asc')
       .skip(offset)
@@ -506,17 +506,8 @@ async function submitOrder(event, context) {
         throw new Error('订单商品信息无效，请重新选择');
       }
       const config = commissionRules.normalizeProductCommission(product);
-      const designatedStaffId = typeof item.designatedStaffId === 'string' && item.designatedStaffId.trim()
-        ? item.designatedStaffId.trim()
-        : (config.scope === 'designated' && activeStaffIds.length === 1 ? activeStaffIds[0] : '');
-      if (config.scope === 'designated' && !designatedStaffId) {
-        throw new Error(source === 'admin'
-          ? `${product.name} 需要指定当前在台游戏师后才能下单`
-          : `${product.name} 需要由店员确认归属后下单，请联系店员处理`);
-      }
-      if (designatedStaffId && !activeStaffIds.includes(designatedStaffId)) {
-        throw new Error(`${product.name} 只能指定当前在台游戏师`);
-      }
+      const designatedStaffId = config.scope === 'designated' && activeStaffIds.length === 1
+        ? activeStaffIds[0] : '';
       return {
         productId: product.id,
         name: product.name,
@@ -600,6 +591,44 @@ async function updateTableStaff(tableId, staffIds, openid) {
   });
 }
 
+async function assignSpecialItem(event, openid) {
+  await assertAdmin(openid);
+  const tableId = normalizeTableId(event.tableId);
+  if (!tables.some((table) => table.id === tableId)) throw new Error('桌号无效');
+  if (typeof event.sessionId !== 'string' || !event.sessionId ||
+      typeof event.orderId !== 'string' || !event.orderId ||
+      !Number.isSafeInteger(event.itemIndex) || event.itemIndex < 0) {
+    throw new Error('特殊商品归属参数无效');
+  }
+  const staffId = typeof event.staffId === 'string' ? event.staffId.trim() : '';
+  return db.runTransaction(async (transaction) => {
+    const session = await getOptionalDocument('bar_sessions', tableId, transaction);
+    if (!session || session.id !== event.sessionId || session.tableId !== tableId) {
+      throw new Error('消费场次已变化或已买单，请刷新账单');
+    }
+    const order = await getOptionalDocument('bar_orders', event.orderId, transaction);
+    if (!order || order.tableId !== tableId || order.sessionId !== session.id) {
+      throw new Error('订单不属于当前桌台场次');
+    }
+    const item = Array.isArray(order.items) ? order.items[event.itemIndex] : null;
+    if (!item || !item.commission || item.commission.scope !== 'designated') {
+      throw new Error('请选择有效的特殊商品');
+    }
+    const employee = staffId ? await getOptionalDocument('bar_employees', staffId, transaction) : null;
+    if (!(session.currentStaffIds || []).includes(staffId) || !employee || !employee.active) {
+      throw new Error('请选择当前在台且在职的游戏师');
+    }
+    const items = order.items.map((entry, index) => index === event.itemIndex
+      ? { ...entry, commission: { ...entry.commission, designatedStaffId: staffId } }
+      : entry);
+    // Share a write conflict with settlement and staff changes, even when totals do not change.
+    const { _id, ...sessionData } = session;
+    await transaction.collection('bar_sessions').doc(tableId).set({ data: sessionData });
+    await transaction.collection('bar_orders').doc(event.orderId).update({ data: { items } });
+    return { ...order, items };
+  });
+}
+
 async function settleTable(tableId, openid, expected) {
   await assertAdmin(openid);
   if (!expected || typeof expected.sessionId !== 'string' || !Number.isFinite(expected.totalAmount)) {
@@ -608,15 +637,11 @@ async function settleTable(tableId, openid, expected) {
   const normalizedId = normalizeTableId(tableId);
   const now = Date.now();
   return db.runTransaction(async (transaction) => {
-    const sessionResult = await transaction.collection('bar_sessions')
-      .where({ tableId: normalizedId })
-      .limit(1)
-      .get();
-    const session = sessionResult.data[0];
+    const session = await getOptionalDocument('bar_sessions', normalizedId, transaction);
     if (!session) {
       throw new Error('该桌当前没有进行中的消费');
     }
-    const orders = await getSessionOrders(session.id, true);
+    const orders = await getSessionOrders(session.id, true, transaction);
     const employeesById = await getEmployeesByIds(collectSessionEmployeeIds(session, orders), transaction);
     const summary = commissionRules.summarizeSession(session, orders, now, hourlyServiceFee, employeesById);
     if (session.id !== expected.sessionId ||
@@ -907,6 +932,9 @@ exports.main = async (event) => {
         break;
       case 'updateTableStaff':
         data = await updateTableStaff(event.tableId, event.staffIds, context.OPENID);
+        break;
+      case 'assignSpecialItem':
+        data = await assignSpecialItem(event, context.OPENID);
         break;
       case 'settleTable':
         data = await settleTable(event.tableId, context.OPENID, event.expected);

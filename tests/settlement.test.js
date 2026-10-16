@@ -41,6 +41,7 @@ function loadApi() {
     doc(id) {
       return {
         async get() {
+          if (name === 'bar_sessions') return { data: id === 'T01' && session ? { ...session } : null };
           if (name === 'bar_employees') return { data: employees[id] ? { ...employees[id] } : null };
           return { data: null };
         },
@@ -104,7 +105,9 @@ test('changed bill or session is rejected without clearing', async () => {
     { sessionId: 'old-session', totalAmount: preview.data.totalAmount, commissionAmountCents: preview.data.commission.amountCents }
   ]) {
     const fresh = loadApi();
-    await assert.rejects(fresh.main({ action: 'settleTable', tableId: 'T01', expected }));
+    const result = await fresh.main({ action: 'settleTable', tableId: 'T01', expected });
+    assert.equal(result.success, false);
+    assert.match(result.error, /账单已变化/);
     assert.ok(fresh.getSession());
     assert.equal(fresh.settlements.length, 0);
   }
@@ -114,7 +117,7 @@ test('settlement is blocked when no active staff can receive shared commission',
   const api = loadApi();
   api.clearStaff();
   const preview = await api.main({ action: 'getTableDetail', tableId: 'T01' });
-  await assert.rejects(api.main({
+  const result = await api.main({
     action: 'settleTable',
     tableId: 'T01',
     expected: {
@@ -122,7 +125,9 @@ test('settlement is blocked when no active staff can receive shared commission',
       totalAmount: preview.data.totalAmount,
       commissionAmountCents: preview.data.commission.amountCents
     }
-  }), /暂不能完成提成结算/);
+  });
+  assert.equal(result.success, false);
+  assert.match(result.error, /暂不能完成提成结算/);
   assert.ok(api.getSession());
   assert.equal(api.settlements.length, 0);
 });

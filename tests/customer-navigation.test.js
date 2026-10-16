@@ -20,6 +20,7 @@ function loadPage(name, store = {}, app = {}) {
       require(path.resolve(name === 'entry' ? path.join(__dirname, '..', 'services') : path.join(__dirname, '..', 'pages', name), id)),
     getApp: () => app,
     setInterval: () => 1,
+    setTimeout: () => 1,
     clearInterval() {},
     wx: {
       redirectTo: (options) => calls.push({ type: 'redirect', ...options }),
@@ -349,7 +350,7 @@ test('checkout previews auto-computed commission and blocks incomplete commissio
   assert.ok(calls.some((entry) => entry.type === 'toast'));
 });
 
-test('staffing sheet updates a table assignment and special admin orders require a designated owner', async () => {
+test('staffing sheet updates a table assignment', async () => {
   const saved = [];
   const { page, calls } = loadPage('admin', {
     listEmployees: async () => [{ id: 'A', name: 'Alice', active: true }, { id: 'B', name: 'Bob', active: true }],
@@ -377,19 +378,146 @@ test('staffing sheet updates a table assignment and special admin orders require
   assert.equal(JSON.stringify(saved[0]), JSON.stringify({ tableId: 'T01', staffIds: ['A'] }));
   assert.ok(calls.some((entry) => entry.title === '游戏师绑定已更新'));
 
-  const menu = loadPage('menu', {
-    getTableById: () => ({ id: 'T01', name: '1号桌' }),
-    getMenu: () => ({ products: [{ id: 'p019', name: '香槟', price: 500, commission: { scope: 'designated', rateBps: 3000 } }] }),
-    getCustomerSession: async () => null,
-    getTableDetail: async () => ({ currentStaff: [{ id: 'A', name: 'Alice' }, { id: 'B', name: 'Bob' }] }),
-    isAdmin: async () => true,
-    submitOrder: async () => ({ id: 'O1' })
+});
+
+test('customer and admin menus submit special products without attribution controls or checks', async () => {
+  const template = fs.readFileSync(path.join(__dirname, '..', 'pages', 'menu', 'menu.wxml'), 'utf8');
+  assert.doesNotMatch(template, /提成|特殊商品|specialStaff|specialCommission|chooseSpecial/);
+  for (const source of ['customer', 'admin']) {
+    const submitted = [];
+    const { page, calls } = loadPage('menu', {
+      getTableById: () => ({ id: 'T01', name: '1号桌' }),
+      getMenu: () => ({ products: [{ id: 'p019', name: '香槟', price: 500, commission: { scope: 'designated', rateBps: 3000 } }] }),
+      getCustomerSession: async () => null,
+      submitOrder: async (order) => { submitted.push(order); return { id: 'O1' }; }
+    });
+    page.onLoad({ tableId: 'T01', source });
+    page.increase({ currentTarget: { dataset: { id: 'p019' } } });
+    await page.submitOrder();
+    assert.equal(submitted.length, 1);
+    assert.equal(submitted[0].source, source);
+    assert.equal(JSON.stringify(submitted[0].items), JSON.stringify([{ productId: 'p019', quantity: 1 }]));
+    assert.equal(page.data.cartCount, 0);
+    assert.equal(page.data.submitting, false);
+    assert.ok(calls.some((entry) => source === 'admin' ? entry.title === '代客下单成功' : entry.type === 'navigate'));
+  }
+});
+
+function specialSummary(staff = [{ id: 'A', name: 'Alice' }, { id: 'B', name: 'Bob' }]) {
+  return {
+    id: 'S1', tableId: 'T01', tableName: '1号桌',
+    itemTotal: 1000, serviceFee: 0, totalAmount: 1000, currentStaff: staff,
+    orders: [{
+      id: 'O1', totalAmount: 1000,
+      items: [0, 1].map(() => ({
+        productId: 'p019', name: '香槟', quantity: 1, price: 500,
+        commission: { scope: 'designated', rateBps: 3000, amountCents: 15000 }
+      }))
+    }]
+  };
+}
+
+const specialEvent = {
+  currentTarget: { dataset: { tableId: 'T01', sessionId: 'S1', orderId: 'O1', itemIndex: 1 } }
+};
+
+test('admin selects and saves special ownership for the exact order line and refreshes bill', async () => {
+  const summary = specialSummary();
+  const saved = [];
+  const { page, calls } = loadPage('admin', {
+    getTableDetail: async () => summary,
+    assignSpecialItem: async (assignment) => {
+      saved.push(assignment);
+      summary.orders[0].items[1].commission.designatedStaffId = assignment.staffId;
+    }
   });
-  menu.page.onLoad({ tableId: 'T01', source: 'admin' });
-  await Promise.resolve();
-  menu.page.increase({ currentTarget: { dataset: { id: 'p019' } } });
-  menu.page.submitOrder();
-  assert.equal(menu.calls[0].title, '香槟 需要先指定提成游戏师');
+  page.data.selectedTableId = 'T01';
+  page.data.checkoutBill = summary;
+  await page.openSpecialAssignment(specialEvent);
+  assert.equal(page.data.specialAssignment.selectedStaffId, '');
+  await page.saveSpecialAssignment();
+  assert.equal(saved.length, 0);
+  page.chooseSpecialOwner({ currentTarget: { dataset: { id: 'B' } } });
+  await page.saveSpecialAssignment();
+  assert.equal(JSON.stringify(saved[0]), JSON.stringify({
+    tableId: 'T01', sessionId: 'S1', orderId: 'O1', itemIndex: 1, staffId: 'B'
+  }));
+  assert.equal(page.data.specialAssignment, null);
+  assert.equal(page.data.checkoutBill.orders[0].items[1].commission.designatedStaffId, 'B');
+  assert.equal(page.data.tableDetail.orders[0].items[0].commission.designatedStaffId, undefined);
+  assert.ok(calls.some((entry) => entry.title === '特殊商品归属已更新'));
+});
+
+test('admin special ownership defaults sole staff, supports cancel and preserves input on failure', async () => {
+  const { page, calls } = loadPage('admin', {
+    getTableDetail: async () => specialSummary([{ id: 'A', name: 'Alice' }]),
+    assignSpecialItem: async () => { throw new Error('游戏师已变更'); }
+  });
+  await page.openSpecialAssignment(specialEvent);
+  assert.equal(page.data.specialAssignment.selectedStaffId, 'A');
+  await page.saveSpecialAssignment();
+  assert.equal(page.data.specialAssignment.selectedStaffId, 'A');
+  assert.equal(page.data.specialAssignment.saving, false);
+  assert.ok(calls.some((entry) => entry.title === '游戏师已变更'));
+  page.closeSpecialAssignment();
+  assert.equal(page.data.specialAssignment, null);
+});
+
+test('special ownership handles empty staff and stale sessions without saving', async () => {
+  const summary = specialSummary([]);
+  const { page, calls } = loadPage('admin', { getTableDetail: async () => summary });
+  await page.openSpecialAssignment(specialEvent);
+  assert.equal(page.data.specialAssignment.employees.length, 0);
+  await page.saveSpecialAssignment();
+  assert.ok(calls.some((entry) => entry.title === '请选择归属游戏师'));
+  page.closeSpecialAssignment();
+  summary.id = 'S2';
+  await page.openSpecialAssignment(specialEvent);
+  assert.equal(page.data.specialAssignment, null);
+  assert.ok(calls.some((entry) => entry.title === '台次已变化，请刷新后重试'));
+});
+
+test('special ownership prevents duplicate writes and checkout while saving', async () => {
+  let finish;
+  let saves = 0;
+  let settlements = 0;
+  const summary = specialSummary([{ id: 'A', name: 'Alice' }]);
+  const { page } = loadPage('admin', {
+    getTableDetail: async () => summary,
+    assignSpecialItem: () => { saves += 1; return new Promise((resolve) => { finish = resolve; }); },
+    settleTable: async () => { settlements += 1; }
+  });
+  page.data.checkoutBill = summary;
+  await page.openSpecialAssignment(specialEvent);
+  const saving = page.saveSpecialAssignment();
+  await page.saveSpecialAssignment();
+  page.closeSpecialAssignment();
+  await page.confirmPayment();
+  assert.equal(saves, 1);
+  assert.equal(settlements, 0);
+  assert.equal(page.data.specialAssignment.saving, true);
+  finish();
+  await saving;
+  assert.equal(page.data.specialAssignment, null);
+});
+
+test('saved ownership is not reported as a failed write when bill refresh fails', async () => {
+  let saved = false;
+  const summary = specialSummary([{ id: 'A', name: 'Alice' }]);
+  const { page, calls } = loadPage('admin', {
+    getTableDetail: async () => {
+      if (saved) throw new Error('network unavailable');
+      return summary;
+    },
+    assignSpecialItem: async () => { saved = true; }
+  });
+  page.data.checkoutBill = summary;
+  await page.openSpecialAssignment(specialEvent);
+  await page.saveSpecialAssignment();
+  assert.equal(saved, true);
+  assert.equal(page.data.specialAssignment, null);
+  assert.equal(page.data.checkoutBill, null);
+  assert.equal(calls.at(-1).title, '归属已保存，账单刷新失败，请重新打开');
 });
 
 test('staff editor saves names and inactive state, reports failures without dismissing input', async () => {
