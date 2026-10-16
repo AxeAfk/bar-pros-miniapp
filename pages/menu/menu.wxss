@@ -161,12 +161,6 @@
   font-weight: 600;
 }
 
-.special-picker {
-  margin-top: 10rpx;
-  color: #f0c77a;
-  font-size: 22rpx;
-}
-
 .menu-item-selected .item-name {
   color: #f0c77a;
 }

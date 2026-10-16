@@ -4,11 +4,6 @@ const { normalizeTableId } = require('../../utils/entry');
 const { hourlyServiceFee } = require('../../config/app');
 const { calculateServiceFeeCents } = require('../../utils/commission');
 
-function isDesignatedProduct(product) {
-  const commission = product && product.commission;
-  return Boolean(commission && (commission.scope === 'designated' || commission.kind === 'special'));
-}
-
 Page({
   data: {
     tableId: '',
@@ -27,9 +22,7 @@ Page({
     timerHint: '首单提交后开始计时',
     sessionActive: false,
     submitting: false,
-    checkoutButtonText: '提交订单',
-    specialStaffOptions: [],
-    specialStaffHint: ''
+    checkoutButtonText: '提交订单'
   },
 
   onLoad(options) {
@@ -42,7 +35,6 @@ Page({
 
     const menu = store.getMenu();
     this.cart = {};
-    this.specialAssignments = {};
     this.setData({
       tableId: table.id,
       tableName: table.name,
@@ -53,18 +45,12 @@ Page({
     this.products = menu.products;
     this.refreshProducts();
     this.refreshSession();
-    if (options.source === 'admin') {
-      this.refreshAdminOrderContext();
-    }
   },
 
   onShow() {
     this.sessionTimer = setInterval(() => this.updateSessionClock(), 1000);
     this.sessionSyncTimer = setInterval(() => this.refreshSession(), 3000);
     this.refreshAdminStatus();
-    if (this.data.isAdminOrder) {
-      this.adminOrderSyncTimer = setInterval(() => this.refreshAdminOrderContext(), 3000);
-    }
   },
 
   onHide() {
@@ -84,10 +70,6 @@ Page({
       clearInterval(this.sessionSyncTimer);
       this.sessionSyncTimer = null;
     }
-    if (this.adminOrderSyncTimer) {
-      clearInterval(this.adminOrderSyncTimer);
-      this.adminOrderSyncTimer = null;
-    }
   },
 
   refreshAdminStatus() {
@@ -99,34 +81,6 @@ Page({
         wx.showToast({ title: error.message || '管理员身份读取失败', icon: 'none' });
         this._adminStatusErrorShown = true;
       }
-    });
-  },
-
-  refreshAdminOrderContext() {
-    if (!this.data.tableId) return;
-    store.getTableDetail(this.data.tableId).then((summary) => {
-      const specialStaffOptions = summary && Array.isArray(summary.currentStaff) ? summary.currentStaff : [];
-      Object.keys(this.specialAssignments).forEach((productId) => {
-        if (!specialStaffOptions.some((entry) => entry.id === this.specialAssignments[productId])) {
-          delete this.specialAssignments[productId];
-        }
-      });
-      if (specialStaffOptions.length === 1) {
-        this.products.filter(isDesignatedProduct).forEach((product) => {
-          if (!this.specialAssignments[product.id]) {
-            this.specialAssignments[product.id] = specialStaffOptions[0].id;
-          }
-        });
-      }
-      this.setData({
-        specialStaffOptions,
-        specialStaffHint: specialStaffOptions.length
-          ? `当前在台游戏师：${specialStaffOptions.map((entry) => entry.name).join('、')}`
-          : '当前桌台还未绑定在台游戏师，特殊商品需要先回后台绑定游戏师'
-      });
-      this.refreshProducts();
-    }).catch((error) => {
-      wx.showToast({ title: error.message || '游戏师信息读取失败', icon: 'none' });
     });
   },
 
@@ -177,21 +131,11 @@ Page({
   },
 
   refreshProducts() {
-    const assignments = this.specialAssignments || {};
-    const visibleProducts = this.products.map((product) => {
-      const specialStaffOptions = this.data.specialStaffOptions || [];
-      const designatedStaffId = assignments[product.id] || '';
-      const selectedStaffIndex = specialStaffOptions.findIndex((entry) => entry.id === designatedStaffId);
-      return {
-        ...product,
-        isDesignated: isDesignatedProduct(product),
-        quantity: this.cart[product.id] || 0,
-        priceText: formatMoney(product.price),
-        specialCommissionText: isDesignatedProduct(product) ? `特殊商品 · ${product.commission.rateBps / 100}% 定向提成` : '',
-        selectedStaffId: designatedStaffId,
-        selectedStaffIndex
-      };
-    });
+    const visibleProducts = this.products.map((product) => ({
+      ...product,
+      quantity: this.cart[product.id] || 0,
+      priceText: formatMoney(product.price)
+    }));
     const cartItems = this.products.filter((product) => this.cart[product.id] > 0);
     const cartCount = cartItems.reduce((sum, product) => sum + this.cart[product.id], 0);
     const cartTotal = cartItems.reduce((sum, product) => sum + product.price * this.cart[product.id], 0);
@@ -204,34 +148,13 @@ Page({
 
   increase(event) {
     const productId = event.currentTarget.dataset.id;
-    if (!this.specialAssignments) this.specialAssignments = {};
     this.cart[productId] = (this.cart[productId] || 0) + 1;
-    if (this.data.isAdminOrder && this.data.specialStaffOptions.length === 1) {
-      const product = this.products.find((entry) => entry.id === productId);
-      if (product && isDesignatedProduct(product)) {
-        this.specialAssignments[productId] = this.data.specialStaffOptions[0].id;
-      }
-    }
     this.refreshProducts();
   },
 
   decrease(event) {
     const productId = event.currentTarget.dataset.id;
-    if (!this.specialAssignments) this.specialAssignments = {};
     this.cart[productId] = Math.max(0, (this.cart[productId] || 0) - 1);
-    if (this.cart[productId] === 0) {
-      delete this.specialAssignments[productId];
-    }
-    this.refreshProducts();
-  },
-
-  chooseSpecialStaff(event) {
-    if (!this.specialAssignments) this.specialAssignments = {};
-    const productId = event.currentTarget.dataset.id;
-    const index = Number(event.detail.value);
-    const employee = this.data.specialStaffOptions[index];
-    if (!employee) return;
-    this.specialAssignments[productId] = employee.id;
     this.refreshProducts();
   },
 
@@ -243,25 +166,14 @@ Page({
       .filter((product) => this.cart[product.id] > 0)
       .map((product) => ({
         productId: product.id,
-        quantity: this.cart[product.id],
-        designatedStaffId: this.specialAssignments[product.id] || ''
+        quantity: this.cart[product.id]
       }));
     if (!items.length) {
       wx.showToast({ title: '请先选择商品', icon: 'none' });
       return;
     }
-    if (this.data.isAdminOrder) {
-      for (const item of items) {
-        const product = this.products.find((entry) => entry.id === item.productId);
-        if (product && isDesignatedProduct(product) && !item.designatedStaffId) {
-          wx.showToast({ title: `${product.name} 需要先指定提成游戏师`, icon: 'none' });
-          return;
-        }
-      }
-    }
-
     this.setData({ submitting: true });
-    store.submitOrder({
+    return store.submitOrder({
       tableId: this.data.tableId,
       tableName: this.data.tableName,
       items,
@@ -269,7 +181,6 @@ Page({
       source: this.data.isAdminOrder ? 'admin' : 'customer'
     }).then((order) => {
       this.cart = {};
-      this.specialAssignments = {};
       this.refreshProducts();
       if (this.data.isAdminOrder) {
         wx.showToast({ title: '代客下单成功' });

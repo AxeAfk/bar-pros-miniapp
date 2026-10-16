@@ -6,8 +6,9 @@ function formatOrder(order) {
   return {
     ...order,
     totalText: formatMoney(order.totalAmount),
-    items: order.items.map((item) => ({
+    items: order.items.map((item, itemIndex) => ({
       ...item,
+      itemIndex,
       commissionText: itemCommissionText(item),
       lineTotalText: formatMoney(item.price * item.quantity),
       unitPriceText: formatMoney(item.price)
@@ -64,7 +65,9 @@ Page({
     checkoutLoading: false,
     settling: false,
     showCommission: false,
-    staffing: null
+    staffing: null,
+    specialAssignment: null,
+    assignmentLoading: false
   },
 
   onShow() {
@@ -241,6 +244,96 @@ Page({
     }
   },
 
+  async openSpecialAssignment(event) {
+    if (this.data.assignmentLoading || this.data.specialAssignment || this.data.settling) return;
+    const { tableId, sessionId, orderId, itemIndex } = event.currentTarget.dataset;
+    this.setData({ assignmentLoading: true });
+    try {
+      const summary = await store.getTableDetail(tableId);
+      if (!summary || summary.id !== sessionId) {
+        throw new Error('台次已变化，请刷新后重试');
+      }
+      const order = summary.orders.find((entry) => entry.id === orderId);
+      const index = Number(itemIndex);
+      const item = order && Number.isSafeInteger(index) && order.items[index];
+      if (!item || !item.commission || item.commission.scope !== 'designated') {
+        throw new Error('特殊商品信息已变化，请刷新后重试');
+      }
+      const employees = summary.currentStaff || [];
+      const ownerId = item.commission.designatedStaffId;
+      const selectedStaffId = employees.some((entry) => entry.id === ownerId)
+        ? ownerId
+        : (employees.length === 1 ? employees[0].id : '');
+      this.setData({
+        specialAssignment: {
+          tableId, sessionId, orderId, itemIndex: index,
+          tableName: summary.tableName,
+          productName: item.name,
+          employees,
+          selectedStaffId,
+          saving: false
+        }
+      });
+    } catch (error) {
+      wx.showToast({ title: error.message || '商品归属读取失败', icon: 'none' });
+    } finally {
+      this.setData({ assignmentLoading: false });
+    }
+  },
+
+  chooseSpecialOwner(event) {
+    const assignment = this.data.specialAssignment;
+    if (!assignment || assignment.saving) return;
+    const staffId = event.currentTarget.dataset.id;
+    if (!assignment.employees.some((entry) => entry.id === staffId)) return;
+    this.setData({ specialAssignment: { ...assignment, selectedStaffId: staffId } });
+  },
+
+  closeSpecialAssignment() {
+    if (this.data.specialAssignment && !this.data.specialAssignment.saving) {
+      this.setData({ specialAssignment: null });
+    }
+  },
+
+  async saveSpecialAssignment() {
+    const assignment = this.data.specialAssignment;
+    if (!assignment || assignment.saving) return;
+    if (!assignment.selectedStaffId) {
+      wx.showToast({ title: '请选择归属游戏师', icon: 'none' });
+      return;
+    }
+    this.setData({ specialAssignment: { ...assignment, saving: true } });
+    try {
+      await store.assignSpecialItem({
+        tableId: assignment.tableId,
+        sessionId: assignment.sessionId,
+        orderId: assignment.orderId,
+        itemIndex: assignment.itemIndex,
+        staffId: assignment.selectedStaffId
+      });
+    } catch (error) {
+      wx.showToast({ title: error.message || '商品归属保存失败', icon: 'none' });
+      this.setData({ specialAssignment: { ...assignment, saving: false } });
+      return;
+    }
+    this.setData({ specialAssignment: null });
+    try {
+      const summary = await store.getTableDetail(assignment.tableId);
+      const updates = {};
+      if (this.data.selectedTableId === assignment.tableId) {
+        updates.tableDetail = summary ? formatSummary(summary) : null;
+      }
+      if (this.data.checkoutBill && this.data.checkoutBill.id === assignment.sessionId) {
+        updates.checkoutBill = summary && summary.id === assignment.sessionId ? formatSummary(summary) : null;
+      }
+      this.setData(updates);
+      wx.showToast({ title: '特殊商品归属已更新' });
+    } catch (error) {
+      this.setData({ checkoutBill: null });
+      wx.showToast({ title: '归属已保存，账单刷新失败，请重新打开', icon: 'none' });
+    }
+  },
+
   async checkout(event) {
     if (this.data.checkoutLoading || this.data.settling) {
       return;
@@ -279,7 +372,7 @@ Page({
 
   async confirmPayment() {
     const bill = this.data.checkoutBill;
-    if (!bill || this.data.settling) {
+    if (!bill || this.data.settling || this.data.specialAssignment || this.data.assignmentLoading) {
       return;
     }
     if (bill.commission && bill.commission.status !== 'complete') {

@@ -160,9 +160,6 @@ function createOrder({ tableId, tableName, items, payMethod, source }) {
     activeSessions[normalizedTableId] = session;
   }
   const activeStaffIds = Array.isArray(session.currentStaffIds) ? session.currentStaffIds : [];
-  const explicitAssignments = Object.fromEntries((items || [])
-    .filter((entry) => typeof entry.designatedStaffId === 'string' && entry.designatedStaffId.trim())
-    .map((entry) => [entry.productId, entry.designatedStaffId.trim()]));
 
   const validItems = items.map((item) => {
     const product = products.find((candidate) => candidate.id === item.productId && candidate.onSale);
@@ -171,16 +168,8 @@ function createOrder({ tableId, tableName, items, payMethod, source }) {
       throw new Error('订单商品信息无效，请重新选择');
     }
     const config = commissionRules.normalizeProductCommission(product);
-    const designatedStaffId = explicitAssignments[product.id] ||
-      (config.scope === 'designated' && activeStaffIds.length === 1 ? activeStaffIds[0] : '');
-    if (config.scope === 'designated' && !designatedStaffId) {
-      throw new Error(source === 'admin'
-        ? `${product.name} 需要指定当前在台游戏师后才能下单`
-        : `${product.name} 需要由店员确认归属后下单，请联系店员处理`);
-    }
-    if (designatedStaffId && !activeStaffIds.includes(designatedStaffId)) {
-      throw new Error(`${product.name} 只能指定当前在台游戏师`);
-    }
+    const designatedStaffId = config.scope === 'designated' && activeStaffIds.length === 1
+      ? activeStaffIds[0] : '';
     return {
       productId: product.id,
       name: product.name,
@@ -460,6 +449,47 @@ function settleTable(tableId, expected) {
     : Promise.resolve().then(() => closeTable(tableId, expected));
 }
 
+function assignSpecialItem({ tableId, sessionId, orderId, itemIndex, staffId }) {
+  const normalizedTableId = normalizeTableId(tableId);
+  if (storageMode === 'cloud') {
+    return callCloud('assignSpecialItem', { tableId: normalizedTableId, sessionId, orderId, itemIndex, staffId });
+  }
+  return Promise.resolve().then(() => {
+    if (!tables.some((table) => table.id === normalizedTableId)) throw new Error('桌号无效');
+    if (typeof sessionId !== 'string' || !sessionId ||
+        typeof orderId !== 'string' || !orderId ||
+        !Number.isSafeInteger(itemIndex) || itemIndex < 0) {
+      throw new Error('特殊商品归属参数无效');
+    }
+    const session = getActiveSession(normalizedTableId);
+    if (!session || session.id !== sessionId || session.tableId !== normalizedTableId) {
+      throw new Error('消费场次已变化或已买单，请刷新账单');
+    }
+    const orders = getOrders();
+    const order = orders.find((entry) => entry.id === orderId);
+    if (!order || order.tableId !== normalizedTableId || order.sessionId !== sessionId) {
+      throw new Error('订单不属于当前桌台场次');
+    }
+    const item = Array.isArray(order.items) ? order.items[itemIndex] : null;
+    if (!item || !item.commission || item.commission.scope !== 'designated') {
+      throw new Error('请选择有效的特殊商品');
+    }
+    const normalizedStaffId = typeof staffId === 'string' ? staffId.trim() : '';
+    const employee = getEmployeeDirectory()[normalizedStaffId];
+    if (!(session.currentStaffIds || []).includes(normalizedStaffId) || !employee || !employee.active) {
+      throw new Error('请选择当前在台且在职的游戏师');
+    }
+    const saved = {
+      ...order,
+      items: order.items.map((entry, index) => index === itemIndex
+        ? { ...entry, commission: { ...entry.commission, designatedStaffId: normalizedStaffId } }
+        : entry)
+    };
+    write(KEYS.orders, orders.map((entry) => entry.id === orderId ? saved : entry));
+    return saved;
+  });
+}
+
 function saveTableStaff(tableId, staffIds) {
   return storageMode === 'cloud'
     ? callCloud('updateTableStaff', { tableId: normalizeTableId(tableId), staffIds })
@@ -618,6 +648,7 @@ module.exports = {
   getDashboard,
   getTableDetail,
   submitOrder,
+  assignSpecialItem,
   settleTable,
   saveTableStaff,
   listAdminMembers,
