@@ -1,5 +1,12 @@
 {
   "permissions": {
     "openapi": ["wxacode.getUnlimited"]
-  }
+  },
+  "triggers": [
+    {
+      "name": "sessionHourlyReminder",
+      "type": "timer",
+      "config": "0 */1 * * * * *"
+    }
+  ]
 }

@@ -54,6 +54,57 @@ There is no automatic retry or guaranteed delivery; check cloud logs and retain
 the dashboard as the order source of truth. Notification visibility and sound
 depend on WeCom and phone settings.
 
+When staff are assigned to open a table, or the first order creates a session,
+`barApi` immediately sends a table-opened notification listing the current game
+masters by name (comma separated, or 未绑定 when none are assigned). Each new-order
+notification also shows the table's current running total (ordered goods plus
+service fees, matching the dashboard table total). The `sessionHourlyReminder`
+timer trigger runs once per minute and sends a separate reminder at each full
+hour after the session start. Notifications stop after settlement; failed
+open-table notifications are retried on a later timer run. Deploy `barApi` with
+the updated `config.json` so the timer trigger is installed; the same
+`WECOM_WEBHOOK_URL` environment variable enables both notification types.
+
+#### Verify the hourly timer deployment
+
+Uploading or releasing the mini program (including `npm run upload`) does not
+deploy cloud functions or install their triggers. Updating the function code
+alone is not proof that its timer has been installed.
+
+In the target cloud environment, open `barApi` and inspect its trigger list.
+If `sessionHourlyReminder` is missing, create a timer trigger with that exact
+name and the seven-field cron expression `0 */1 * * * * *` (once per minute).
+Alternatively, deploy the triggers from this directory's `config.json` using
+the WeChat DevTools cloud-function trigger deployment option. Verify the
+trigger appears in the cloud console after deployment.
+
+To check the deployed handler without waiting another hour, use the function's
+cloud-console test facility with this event:
+
+```json
+{
+  "Type": "Timer",
+  "TriggerName": "sessionHourlyReminder"
+}
+```
+
+For an active session that has completed at least one hour and has not yet been
+reminded for its latest full hour, expect a WeCom reminder and a response such
+as `{"success":true,"data":{"notified":1}}`. Pending opening notifications also
+count toward `notified`. A repeated invocation must not resend a successfully
+delivered reminder for the same hour. If several hours were missed, only the
+latest full-hour reminder is sent, not one message for every missed hour.
+An invocation before the first full hour can legitimately return `notified: 0`.
+`skipped: true` means the webhook environment variable is empty; check
+`WeCom notification failed`, `Hourly reminder failed`, `Session opened
+notification failed` and `barApi failed` logs for delivery or database errors.
+
+Finally, verify automatic invocations appear in the cloud logs every minute,
+without running a console test or keeping the mini program open. A dashboard
+response containing `stats`, `tables`, and `orders` is not a timer invocation.
+The reminder arrives on the first timer scan after the hour is completed,
+normally within about one minute, rather than at the exact second.
+
 The entry page routes valid table parameters directly to the menu regardless of
 role. Without table parameters, `isAdmin` checks the server-side `OWNER_OPENID`
 fallback plus the database member list: administrators enter the backend, while

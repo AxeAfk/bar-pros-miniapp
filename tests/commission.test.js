@@ -180,6 +180,7 @@ function loadApi(options = {}) {
   };
   let openid = 'admin';
   const qrRequests = [];
+  const notifications = [];
   const operations = [];
   const getField = (document, field) => field.split('.').reduce((value, key) => value && value[key], document);
   const collection = (name, transaction = false) => {
@@ -268,12 +269,15 @@ function loadApi(options = {}) {
   };
   const context = {
     exports: {},
-    process: { env: { OWNER_OPENID: 'admin', ADMIN_OPENIDS: 'admin' } },
+    process: { env: { OWNER_OPENID: 'admin', ADMIN_OPENIDS: 'admin', WECOM_WEBHOOK_URL: options.webhook || '' } },
     console: { error() {} },
     Buffer,
     require: (id) => {
       if (id === 'wx-server-sdk') return cloud;
-      if (id === './order-notifications') return { notifyWecomRobot: async () => ({ success: true }) };
+      if (id === './order-notifications') return {
+        notifyWecomRobot: async (order) => { notifications.push({ type: 'order', data: plain(order) }); return { success: true }; },
+        notifyWecomSessionOpened: async (session) => { notifications.push({ type: 'opened', data: plain(session) }); return { success: true }; }
+      };
       return require(id.startsWith('.') ? path.join(apiDirectory, id) : id);
     }
   };
@@ -285,6 +289,7 @@ function loadApi(options = {}) {
       return result.data;
     },
     qrRequests: () => qrRequests.slice(),
+    notifications,
     operations,
     documents: () => documents,
     setUser: (value) => { openid = value; }
@@ -341,6 +346,25 @@ test('cloud dashboard table totals include ordered goods as well as service fees
   assert.equal(table.itemTotal, 50);
   assert.equal(table.serviceFee, 99);
   assert.equal(table.totalAmount, 149);
+});
+
+test('WeCom notifications carry game master names and the running table total', async () => {
+  const api = loadApi({ webhook: 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=test' });
+  const alice = await api.call('saveEmployee', { employee: { name: 'Alice', active: true } });
+  const bob = await api.call('saveEmployee', { employee: { name: 'Bob', active: true } });
+  await api.call('updateTableStaff', { tableId: 'T01', staffIds: [alice.id, bob.id] });
+  const opened = api.notifications.filter((entry) => entry.type === 'opened');
+  assert.equal(opened.length, 1);
+  assert.deepEqual(opened[0].data.staffNames, ['Alice', 'Bob']);
+
+  await api.call('submitOrder', { tableId: 'T01', source: 'admin', items: [{ productId: 'p001', quantity: 2 }] });
+  await api.call('submitOrder', { tableId: 'T01', source: 'admin', items: [{ productId: 'p001', quantity: 1 }] });
+  const orders = api.notifications.filter((entry) => entry.type === 'order');
+  assert.equal(orders.length, 2);
+  assert.equal(orders[1].data.totalAmount, 25);
+  const detail = await api.call('getTableDetail', { tableId: 'T01' });
+  assert.equal(orders[1].data.tableTotalAmount, detail.totalAmount);
+  assert.equal(orders[1].data.tableTotalAmount, 75 + detail.serviceFee);
 });
 
 test('special goods are auto-assigned to the sole current staff and do not block admin orders without staff', async () => {

@@ -36,6 +36,7 @@ const products = [
 const hourlyServiceFee = 99;
 const hourMs = 60 * 60 * 1000;
 const adminInviteTtlMs = 30 * 60 * 1000;
+const hourlyReminderLeaseMs = 2 * 60 * 1000;
 
 function normalizeTableId(value) {
   const input = String(value || '').trim().toUpperCase();
@@ -83,7 +84,8 @@ function createSessionRecord(table, startedAt, staffIds = []) {
     startedAt,
     startedAtText: formatTime(startedAt),
     currentStaffIds: normalizedStaffIds,
-    staffSegments: [createStaffSegment(normalizedStaffIds, startedAt)]
+    staffSegments: [createStaffSegment(normalizedStaffIds, startedAt)],
+    openedNotificationPending: true
   };
 }
 
@@ -524,7 +526,8 @@ async function submitOrder(event, context) {
   const orderId = createId('O');
   await ensureTables();
 
-  return db.runTransaction(async (transaction) => {
+  let startedSession = null;
+  const order = await db.runTransaction(async (transaction) => {
     const tableResult = await transaction.collection('bar_tables')
       .where({ id: tableId })
       .limit(1)
@@ -539,8 +542,10 @@ async function submitOrder(event, context) {
       .limit(1)
       .get();
     let session = existingResult.data[0] ? { ...existingResult.data[0] } : null;
+    startedSession = null;
     if (!session) {
       session = createSessionRecord(table, now, []);
+      startedSession = session;
     }
     delete session._id;
     const activeStaffIds = Array.isArray(session.currentStaffIds) ? session.currentStaffIds : [];
@@ -580,6 +585,10 @@ async function submitOrder(event, context) {
     await transaction.collection('bar_orders').doc(orderId).set({ data: order });
     return order;
   });
+  if (startedSession) {
+    await sendSessionOpenedNotification(startedSession, Date.now(), process.env.WECOM_WEBHOOK_URL);
+  }
+  return order;
 }
 
 async function updateTableStaff(tableId, staffIds, openid) {
@@ -592,7 +601,7 @@ async function updateTableStaff(tableId, staffIds, openid) {
   if (!normalizedStaffIds.length) {
     throw new Error('请至少绑定一位在台游戏师');
   }
-  return db.runTransaction(async (transaction) => {
+  const result = await db.runTransaction(async (transaction) => {
     const employeesById = await getEmployeesByIds(normalizedStaffIds, transaction);
     normalizedStaffIds.forEach((employeeId) => {
       if (!employeesById[employeeId] || !employeesById[employeeId].active) {
@@ -610,6 +619,7 @@ async function updateTableStaff(tableId, staffIds, openid) {
       .get();
     let session = sessionResult.data[0] ? { ...sessionResult.data[0] } : null;
     const now = Date.now();
+    const isNewSession = !session;
     if (!session) {
       const table = tables.find((entry) => entry.id === normalizedId);
       session = createSessionRecord(table, now, normalizedStaffIds);
@@ -617,7 +627,7 @@ async function updateTableStaff(tableId, staffIds, openid) {
       delete session._id;
       const current = commissionRules.normalizeStaffIds(Array.isArray(session.currentStaffIds) ? session.currentStaffIds : []);
       if (current.length === normalizedStaffIds.length && current.every((id, index) => id === normalizedStaffIds[index])) {
-        return session;
+        return { session, isNewSession: false };
       }
       const segments = Array.isArray(session.staffSegments) && session.staffSegments.length
         ? session.staffSegments.map((segment) => ({
@@ -637,8 +647,12 @@ async function updateTableStaff(tableId, staffIds, openid) {
       };
     }
     await transaction.collection('bar_sessions').doc(normalizedId).set({ data: session });
-    return session;
+    return { session, isNewSession };
   });
+  if (result.isNewSession) {
+    await sendSessionOpenedNotification(result.session, Date.now(), process.env.WECOM_WEBHOOK_URL);
+  }
+  return result.session;
 }
 
 async function assignSpecialItem(event, openid) {
@@ -747,6 +761,170 @@ async function settleTable(tableId, openid, expected) {
     await transaction.collection('bar_sessions').doc(normalizedId).remove();
     return settlement;
   });
+}
+
+async function claimSessionOpenedNotification(tableId, expectedSessionId, now) {
+  return db.runTransaction(async (transaction) => {
+    const session = await getOptionalDocument('bar_sessions', tableId, transaction);
+    if (!session || session.id !== expectedSessionId || !session.openedNotificationPending) {
+      return null;
+    }
+    if (session.hourlyReminderLock && session.hourlyReminderLock.expiresAt > now) {
+      return null;
+    }
+    const { _id, ...sessionData } = session;
+    await transaction.collection('bar_sessions').doc(tableId).set({
+      data: {
+        ...sessionData,
+        hourlyReminderLock: { type: 'opened', expiresAt: now + hourlyReminderLeaseMs }
+      }
+    });
+    return { ...sessionData, id: session.id };
+  });
+}
+
+async function finishSessionOpenedNotification(tableId, sessionId, succeeded) {
+  return db.runTransaction(async (transaction) => {
+    const session = await getOptionalDocument('bar_sessions', tableId, transaction);
+    if (!session || session.id !== sessionId ||
+        !session.hourlyReminderLock || session.hourlyReminderLock.type !== 'opened') {
+      return;
+    }
+    const { _id, ...sessionData } = session;
+    delete sessionData.hourlyReminderLock;
+    if (succeeded) {
+      sessionData.openedNotificationPending = false;
+      sessionData.openedNotificationSentAt = Date.now();
+    }
+    await transaction.collection('bar_sessions').doc(tableId).set({ data: sessionData });
+  });
+}
+
+async function resolveStaffNames(staffIds) {
+  const ids = commissionRules.normalizeStaffIds(Array.isArray(staffIds) ? staffIds : []);
+  if (!ids.length) return [];
+  try {
+    const employeesById = await getEmployeesByIds(ids);
+    return ids.map((id) => (employeesById[id] && employeesById[id].name) || id);
+  } catch (error) {
+    return ids;
+  }
+}
+
+async function attachTableTotal(order) {
+  try {
+    const session = await getOptionalDocument('bar_sessions', order.tableId);
+    if (!session || session.id !== order.sessionId) return order;
+    const summary = summarizeSession(session, await getSessionOrders(session.id, true));
+    return { ...order, tableTotalAmount: summary.totalAmount };
+  } catch (error) {
+    return order;
+  }
+}
+
+async function sendSessionOpenedNotification(session, now, webhookUrl) {
+  if (!String(webhookUrl || '').trim()) return false;
+  try {
+    const claim = await claimSessionOpenedNotification(session.tableId, session.id, now);
+    if (!claim) return false;
+    const notification = await require('./order-notifications').notifyWecomSessionOpened(
+      { ...claim, staffNames: await resolveStaffNames(claim.currentStaffIds) },
+      webhookUrl
+    );
+    await finishSessionOpenedNotification(
+      session.tableId,
+      session.id,
+      Boolean(notification && notification.success)
+    );
+    return Boolean(notification && notification.success);
+  } catch (error) {
+    console.error('Session opened notification failed', { tableId: session.tableId, error: error.message });
+    return false;
+  }
+}
+
+async function claimHourlyReminder(tableId, expectedSessionId, now) {
+  return db.runTransaction(async (transaction) => {
+    const session = await getOptionalDocument('bar_sessions', tableId, transaction);
+    if (!session || session.id !== expectedSessionId || !Number.isFinite(session.startedAt)) {
+      return null;
+    }
+    const elapsedHours = Math.floor((now - session.startedAt) / hourMs);
+    const lastReminderHour = Number(session.lastHourlyReminderHour || 0);
+    if (elapsedHours < 1 || elapsedHours <= lastReminderHour) {
+      return null;
+    }
+    if (session.hourlyReminderLock && session.hourlyReminderLock.expiresAt > now) {
+      return null;
+    }
+    const { _id, ...sessionData } = session;
+    await transaction.collection('bar_sessions').doc(tableId).set({
+      data: {
+        ...sessionData,
+        hourlyReminderLock: {
+          type: 'hourly',
+          hour: elapsedHours,
+          expiresAt: now + hourlyReminderLeaseMs
+        }
+      }
+    });
+    return { ...sessionData, id: session.id, reminderHour: elapsedHours };
+  });
+}
+
+async function finishHourlyReminder(tableId, sessionId, reminderHour, succeeded) {
+  return db.runTransaction(async (transaction) => {
+    const session = await getOptionalDocument('bar_sessions', tableId, transaction);
+    if (!session || session.id !== sessionId ||
+        !session.hourlyReminderLock || session.hourlyReminderLock.type !== 'hourly' ||
+        session.hourlyReminderLock.hour !== reminderHour) {
+      return;
+    }
+    const { _id, ...sessionData } = session;
+    delete sessionData.hourlyReminderLock;
+    if (succeeded) {
+      sessionData.lastHourlyReminderHour = reminderHour;
+    }
+    await transaction.collection('bar_sessions').doc(tableId).set({ data: sessionData });
+  });
+}
+
+async function sendHourlySessionReminders(now, webhookUrl) {
+  if (!String(webhookUrl || '').trim()) {
+    return { notified: 0, skipped: true };
+  }
+  const sessions = await listCollectionDocuments('bar_sessions');
+  let notified = 0;
+  for (const session of sessions) {
+    if (!session || !session.tableId || !session.id) continue;
+    if (session.openedNotificationPending) {
+      if (await sendSessionOpenedNotification(session, now, webhookUrl)) {
+        notified += 1;
+      }
+    }
+    try {
+      const claim = await claimHourlyReminder(session.tableId, session.id, now);
+      if (!claim) continue;
+      const reminder = await require('./order-notifications').notifyWecomHourlyReminder(
+        claim,
+        claim.reminderHour,
+        formatTime(now),
+        webhookUrl
+      );
+      await finishHourlyReminder(
+        session.tableId,
+        session.id,
+        claim.reminderHour,
+        Boolean(reminder && reminder.success)
+      );
+      if (reminder && reminder.success) {
+        notified += 1;
+      }
+    } catch (error) {
+      console.error('Hourly reminder failed', { tableId: session.tableId, error: error.message });
+    }
+  }
+  return { notified };
 }
 
 async function getAdminProfile(openid) {
@@ -984,7 +1162,9 @@ exports.main = async (event) => {
   try {
     const context = cloud.getWXContext();
     let data;
-    switch (event.action) {
+    if (event && event.Type === 'Timer' && event.TriggerName === 'sessionHourlyReminder') {
+      data = await sendHourlySessionReminders(Date.now(), process.env.WECOM_WEBHOOK_URL);
+    } else switch (event.action) {
       case 'listTables':
         data = await listTables();
         break;
@@ -1014,7 +1194,12 @@ exports.main = async (event) => {
         break;
       case 'submitOrder':
         data = await submitOrder(event, context);
-        await require('./order-notifications').notifyWecomRobot(data, process.env.WECOM_WEBHOOK_URL);
+        if (String(process.env.WECOM_WEBHOOK_URL || '').trim()) {
+          await require('./order-notifications').notifyWecomRobot(
+            await attachTableTotal(data),
+            process.env.WECOM_WEBHOOK_URL
+          );
+        }
         data = publicOrder(data);
         break;
       case 'getDashboard':
